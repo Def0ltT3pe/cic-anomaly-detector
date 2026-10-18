@@ -1,0 +1,14 @@
+{
+  "algorithm": "sha256",
+  "created_at": "2026-10-18T23:03:52+00:00",
+  "files": {
+    "isolation_forest.pkl": "88c075e4875697e3026051efa76d2ebdf98e2a6854899323999c4aa198fb6c2b",
+    "scaler.pkl": "e34d6e65641538a670525ac0fd61b3389c509e80ddabc079488fd7d00a85a716",
+    "feature_cols_filtered.pkl": "d7b1a1221d29ac9f8e982a70c4c0125e4abb502ea67b8dab94d66d6cf5423120"
+  },
+  "signature": {
+    "algorithm": "ed25519",
+    "fingerprint": "58e23577f635a5f6edc18ee42a7ebddab1321922461979a15813593440f7240e",
+    "value": "sTi48EogeKFuSd1j7kniE7hnOwUmF8SGJhhTnVbrKtpy16kkfOGKgWec1OxGq+5h8pxEDZ9NMQNNVx/VvTLwAw=="
+  }
+}

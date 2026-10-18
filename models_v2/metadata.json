@@ -1,0 +1,30 @@
+{
+  "version": "v2-experimental",
+  "created_at": "2026-10-18T22:04:22+00:00",
+  "note": "Экспериментальная модель: обучена на benign нескольких дней, без селектора. По AUC не превосходит models/; по умолчанию не используется.",
+  "features": 67,
+  "training_files": [
+    "Benign-Monday-no-metadata.parquet",
+    "Bruteforce-Tuesday-no-metadata.parquet",
+    "DoS-Wednesday-no-metadata.parquet"
+  ],
+  "train_rows": 360000,
+  "holdout_rows": 90000,
+  "contamination": 0.05,
+  "n_estimators": 100,
+  "target_fpr": 0.02,
+  "threshold": -0.05758122135679039,
+  "holdout_fpr": 0.02,
+  "evaluation": {
+    "DoS-Wednesday-no-metadata.parquet": {
+      "attacks": 193756,
+      "recall": 0.739631288837507,
+      "flagged": 143308
+    },
+    "Bruteforce-Tuesday-no-metadata.parquet": {
+      "attacks": 9150,
+      "recall": 0.0,
+      "flagged": 0
+    }
+  }
+}

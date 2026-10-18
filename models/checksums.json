@@ -1,0 +1,17 @@
+{
+  "algorithm": "sha256",
+  "created_at": "2026-10-18T23:03:52+00:00",
+  "files": {
+    "isolation_forest.pkl": "451a7b39118eebe515a317e9e849e6611ab645c1680a7b45bee50e54aedf0631",
+    "scaler.pkl": "215d3a74f088ec26544450e19a14a820def7df04534bafa956ca33182b70f749",
+    "selector.pkl": "b531c371c9fcf265217443171b713ff0ad060945f60a8680eb938139b54b4a53",
+    "feature_cols_filtered.pkl": "d7b1a1221d29ac9f8e982a70c4c0125e4abb502ea67b8dab94d66d6cf5423120",
+    "bruteforce.pkl": "78ce9690bc9d5a4eb2c25ed798ad08d9254f31b8b3eb6c1f024ec041e3ff485f",
+    "bruteforce.json": "59f0d11ffc55b049dcf833c3454ce0d7b93f5e857b50de3ddb3cfed762217d33"
+  },
+  "signature": {
+    "algorithm": "ed25519",
+    "fingerprint": "58e23577f635a5f6edc18ee42a7ebddab1321922461979a15813593440f7240e",
+    "value": "Gz53WWskFbN0jnw0C8dzI0GFQ8Aqs7grR1LxyVqo0qedaxqZSvtwa3ceCn449ZCSEkVI0qD2Ibqp5GJycFxWCA=="
+  }
+}

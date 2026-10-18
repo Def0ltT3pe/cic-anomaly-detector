@@ -1,0 +1,15 @@
+# Основные зависимости приложения и Docker-образа.
+# Версии совместимы с Python 3.12 (python:3.12-slim).
+pandas>=2.2,<4
+numpy>=1.26,<3
+scikit-learn>=1.4,<2
+joblib>=1.3,<2
+streamlit>=1.36,<2
+# Без pyarrow pandas не умеет read_parquet — в контейнере это критично.
+pyarrow>=15,<22
+# Клиент Gemini (пояснения ИИ). Необязателен для самой детекции.
+# Новый SDK; код также умеет работать со старым google-generativeai,
+# если он установлен вместо нового.
+google-genai>=1.0,<3
+# Ed25519-подпись checksums.json.
+cryptography>=42,<50
