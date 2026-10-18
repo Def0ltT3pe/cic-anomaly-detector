@@ -1,0 +1,20 @@
+# Не тащим в образ лишнее и не запекаем секреты
+.git
+.github
+.gitignore
+.idea
+__pycache__
+*.py[cod]
+*.log
+.env
+.streamlit/secrets.toml
+.venv
+venv
+.pytest_cache
+tests
+data
+*.parquet
+REVIEW.md
+keys
+config/users.json
+audit

@@ -1,0 +1,21 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.idea/
+.env
+.streamlit/secrets.toml
+*.log
+.pytest_cache/
+.venv/
+venv/
+anomaly_report*.txt
+.test-tmp/
+_test_tmp/
+_tmp_test/
+pip-*
+REVIEW.md
+
+# приватный ключ подписи моделей и пользовательские данные
+keys/
+config/users.json
+audit/

@@ -1,0 +1,28 @@
+services:
+  anomaly-detector:
+    build: .
+    image: cic-anomaly-detector:latest
+    container_name: cic_anomaly_detector
+    ports:
+      # 0.0.0.0 — доступ по сети; 127.0.0.1 — только с этой машины.
+      # Для публичного сервера обязательно задайте APP_PASSWORD или поставьте reverse proxy.
+      - "${APP_BIND:-0.0.0.0}:${APP_PORT:-8501}:8501"
+    environment:
+      # Пустое значение = пояснения ИИ отключены, детекция работает.
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      APP_PASSWORD: ${APP_PASSWORD:-}
+      # models — рабочая модель, models_v2 — экспериментальная.
+      MODEL_DIR: ${MODEL_DIR:-models}
+      # 0 — отключить проверку SHA-256 моделей.
+      VERIFY_MODEL_CHECKSUMS: ${VERIFY_MODEL_CHECKSUMS:-1}
+    volumes:
+      # users.json читается с хоста; каталог можно не создавать — будет открытый режим.
+      - ./config:/app/config:ro
+      # журнал аудита переживает перезапуск контейнера
+      - audit_data:/app/audit
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  audit_data:
