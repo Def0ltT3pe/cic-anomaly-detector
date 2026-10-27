@@ -16,6 +16,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from modules.integrity import IntegrityError, verify_if_listed
 from modules.model_loader import resolve_model_dir
 
 CALIBRATION_FILE = "calibration.json"
@@ -33,30 +34,47 @@ class Calibration:
     quantiles: np.ndarray
     rows: int = 0
     source: str = ""
+    # False — calibration.json не покрыт checksums.json (подмена не обнаружится)
+    protected: bool = True
+
+    def _cdf(self, scores) -> np.ndarray:
+        """Эмпирическая CDF benign-score с линейной интерполяцией между квантилями.
+
+        quantiles[k] — квантиль уровня k/(n-1), поэтому интерполяция даёт
+        точное значение в узлах (score на пороге 2% -> 2%), а не ступеньку
+        до следующего узла, как searchsorted. Нефинитный score считается
+        аномальнее всей нормы (CDF = 0).
+        """
+        scores = np.asarray(scores, dtype=float)
+        levels = np.linspace(0.0, 1.0, len(self.quantiles))
+        cdf = np.interp(scores, self.quantiles, levels, left=0.0, right=1.0)
+        return np.where(np.isfinite(scores), cdf, 0.0)
 
     def percentile(self, score: float) -> float:
         """Доля benign-трафика со score <= данного, %."""
-        if score is None or not np.isfinite(score):
+        if score is None:
             return 0.0
-        index = int(np.searchsorted(self.quantiles, score, side="left"))
-        return float(np.clip(index / (len(self.quantiles) - 1) * 100.0, 0.0, 100.0))
+        return float(self._cdf([score])[0] * 100.0)
 
     def anomaly_percentile(self, score: float) -> float:
         """Насколько запись аномальнее нормы, % (100 — аномальнее всей нормы)."""
         return 100.0 - self.percentile(score)
 
     def anomaly_percentiles(self, scores) -> np.ndarray:
-        scores = np.asarray(scores, dtype=float)
-        index = np.searchsorted(self.quantiles, scores, side="left")
-        cdf = index / (len(self.quantiles) - 1)
-        return np.clip((1.0 - cdf) * 100.0, 0.0, 100.0)
+        return (1.0 - self._cdf(scores)) * 100.0
 
 
 def load_calibration(model_dir: str | None = None) -> Calibration | None:
     """Читает calibration.json рядом с моделью. None, если файла нет."""
-    path = os.path.join(resolve_model_dir(model_dir), CALIBRATION_FILE)
+    directory = resolve_model_dir(model_dir)
+    path = os.path.join(directory, CALIBRATION_FILE)
     if not os.path.isfile(path):
         return None
+
+    try:
+        unprotected = verify_if_listed(directory, [CALIBRATION_FILE])
+    except IntegrityError as exc:
+        raise CalibrationError(str(exc)) from exc
 
     try:
         with open(path, encoding="utf-8") as handle:
@@ -88,4 +106,5 @@ def load_calibration(model_dir: str | None = None) -> Calibration | None:
         quantiles=quantiles,
         rows=int(payload.get("rows", 0)),
         source=str(payload.get("source", "")),
+        protected=not unprotected,
     )

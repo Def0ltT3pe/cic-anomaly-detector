@@ -31,6 +31,7 @@ if BASE_DIR not in sys.path:
 
 from modules.integrity import write_checksums
 from modules.model_loader import load_model_objects
+from modules.pipeline import prepare_features
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -53,12 +54,12 @@ def _read_columns(path: str, cols: list[str]) -> pd.DataFrame:
 
 
 def _load_benign(path: str, cols: list[str], limit: int, seed: int) -> pd.DataFrame:
+    """Сырые benign-строки: NaN/inf сохраняются и заполняются позже, как при детекции."""
     df = _read_columns(path, cols)
     labels = df["Label"].astype(str).str.strip().str.lower()
     benign = df.loc[labels == "benign", cols].replace([np.inf, -np.inf], np.nan)
-    benign = benign.dropna()
     if benign.empty:
-        raise ValueError(f"В {path} нет корректных benign-строк.")
+        raise ValueError(f"В {path} нет benign-строк.")
     if limit and len(benign) > limit:
         benign = benign.sample(limit, random_state=seed)
     return benign
@@ -67,8 +68,11 @@ def _load_benign(path: str, cols: list[str], limit: int, seed: int) -> pd.DataFr
 def _load_attacks(path: str, cols: list[str], fill_values: pd.Series) -> pd.DataFrame:
     df = _read_columns(path, cols)
     labels = df["Label"].astype(str).str.strip().str.lower()
-    attacks = df.loc[labels != "benign", cols].replace([np.inf, -np.inf], np.nan)
-    return attacks.fillna(fill_values)
+    attacks = df.loc[labels != "benign", cols]
+    if attacks.empty:
+        return attacks
+    X, _ = prepare_features(attacks, cols, fill_values=fill_values)
+    return X
 
 
 def main() -> int:
@@ -100,9 +104,26 @@ def main() -> int:
     rng = np.random.default_rng(args.seed)
     order = rng.permutation(len(X))
     cut = int(len(X) * 0.8)
-    train = X.iloc[order[:cut]]
-    holdout = X.iloc[order[cut:]]
-    print(f"train={len(train):,} holdout={len(holdout):,}")
+    train_raw = X.iloc[order[:cut]]
+    holdout_raw = X.iloc[order[cut:]]
+    print(f"train={len(train_raw):,} holdout={len(holdout_raw):,}")
+
+    # Статистики нормы — по конечным значениям train. Ими же заполняются
+    # пропуски в train/holdout, ровно как pipeline.detect_anomalies делает
+    # с входными данными (fill_values = normal_stats.json -> means).
+    means = train_raw.mean()
+    stds = train_raw.std()
+    if not np.isfinite(means.to_numpy()).all():
+        print("Ошибка: у части признаков в train нет ни одного конечного значения.")
+        return 2
+    if not np.isfinite(stds.to_numpy()).all() or (stds <= 0).any():
+        print("Ошибка: в обучающей выборке есть нулевые/нефинитные std.")
+        return 2
+
+    train, train_info = prepare_features(train_raw, cols, fill_values=means)
+    holdout, _ = prepare_features(holdout_raw, cols, fill_values=means)
+    if train_info["nan_filled"]:
+        print(f"Заполнено пропусков/inf средними нормы: {train_info['nan_filled']:,}")
 
     scaler = StandardScaler().fit(train)
     model = IsolationForest(
@@ -116,12 +137,6 @@ def main() -> int:
     threshold = float(np.quantile(holdout_scores, args.target_fpr))
     holdout_fpr = float((holdout_scores <= threshold).mean())
     print(f"Порог {threshold:.4f}; FPR на holdout {holdout_fpr:.2%}")
-
-    means = train.mean()
-    stds = train.std()
-    if not np.isfinite(stds.to_numpy()).all() or (stds <= 0).any():
-        print("Ошибка: в обучающей выборке есть нулевые/нефинитные std.")
-        return 2
 
     output_dir = args.output_dir
     if not os.path.isabs(output_dir):

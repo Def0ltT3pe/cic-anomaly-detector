@@ -26,12 +26,15 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 if BASE_DIR not in sys.path:
     sys.path.insert(0, BASE_DIR)
 
+from modules.calibration import CALIBRATION_FILE
+from modules.integrity import private_key_path, write_checksums
 from modules.model_loader import (
     ModelLoadError,
     load_model_objects,
     load_normal_stats,
     resolve_model_dir,
 )
+from modules.pipeline import prepare_features
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -44,20 +47,24 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _read_benign(path: str, cols: list[str], limit: int) -> pd.DataFrame:
+def _read_benign(
+    path: str, cols: list[str], limit: int, fill_values: pd.Series
+) -> pd.DataFrame:
     if path.lower().endswith(".parquet"):
         df = pd.read_parquet(path, columns=cols + ["Label"])
     else:
         df = pd.read_csv(path, usecols=cols + ["Label"])
 
     labels = df["Label"].astype(str).str.strip().str.lower()
-    benign = df.loc[labels == "benign", cols].replace([np.inf, -np.inf], np.nan)
-    benign = benign.dropna()
+    benign = df.loc[labels == "benign", cols]
     if benign.empty:
-        raise ValueError(f"В {path} нет корректных benign-строк.")
+        raise ValueError(f"В {path} нет benign-строк.")
     if len(benign) > limit:
         benign = benign.sample(limit, random_state=42)
-    return benign
+    # Та же обработка NaN/inf, что и при детекции: иначе порог считается
+    # по распределению без «грязных» строк, а на них же потом применяется.
+    X, _ = prepare_features(benign, cols, fill_values=fill_values)
+    return X
 
 
 def main() -> int:
@@ -82,12 +89,15 @@ def main() -> int:
             print(f"Ошибка: файл не найден: {path}")
             return 2
         try:
-            benign = _read_benign(path, feature_cols, args.limit_per_file)
+            benign = _read_benign(path, feature_cols, args.limit_per_file, means)
         except Exception as exc:
             print(f"Ошибка чтения {path}: {exc}")
             return 2
 
-        scores = model.decision_function(selector.transform(scaler.transform(benign)))
+        X_scaled = scaler.transform(benign)
+        # В v2 селектора нет (см. model_loader.load_model_objects)
+        X_filtered = selector.transform(X_scaled) if selector is not None else X_scaled
+        scores = model.decision_function(X_filtered)
         per_file[os.path.basename(path)] = scores
         all_scores.append(scores)
         print(f"{os.path.basename(path)}: benign={len(benign):,}")
@@ -103,7 +113,8 @@ def main() -> int:
     for name, fpr in achieved.items():
         print(f"  {name}: FPR {fpr:.2%}")
 
-    output = args.output or os.path.join(resolve_model_dir(args.model_dir), "calibration.json")
+    model_dir = resolve_model_dir(args.model_dir)
+    output = args.output or os.path.join(model_dir, CALIBRATION_FILE)
     os.makedirs(os.path.dirname(os.path.abspath(output)) or ".", exist_ok=True)
 
     payload = {
@@ -119,6 +130,18 @@ def main() -> int:
         json.dump(payload, handle, ensure_ascii=False, indent=2)
 
     print(f"\nСохранено: {os.path.abspath(output)}")
+
+    # calibration.json входит в checksums.json: без пересчёта приложение
+    # отклонит новый порог как подменённый.
+    if os.path.abspath(output) == os.path.join(model_dir, CALIBRATION_FILE):
+        if os.path.isfile(private_key_path()):
+            write_checksums(model_dir)
+            print("checksums.json пересчитан и подписан")
+        else:
+            print(
+                "ВНИМАНИЕ: нет приватного ключа — пересчитайте и подпишите checksums: "
+                "python make_checksums.py"
+            )
     return 0
 
 

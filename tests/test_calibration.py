@@ -28,6 +28,20 @@ class CalibrationTests(unittest.TestCase):
         values = self.calibration.anomaly_percentiles(np.array([-2.0, 0.0, 2.0]))
         self.assertEqual(values.tolist(), [100.0, 50.0, 0.0])
 
+    def test_score_on_quantile_node_is_exact(self):
+        # quantiles[2] — 2-й перцентиль нормы: аномальнее ровно 98%, а не 97/99
+        values = self.calibration.anomaly_percentiles(self.quantiles[[1, 2, 50]])
+        np.testing.assert_allclose(values, [99.0, 98.0, 50.0])
+
+    def test_interpolates_between_nodes(self):
+        middle = (self.quantiles[2] + self.quantiles[3]) / 2
+        self.assertAlmostEqual(self.calibration.percentile(middle), 2.5)
+
+    def test_non_finite_score_is_max_anomaly(self):
+        values = self.calibration.anomaly_percentiles(np.array([np.nan, np.inf]))
+        self.assertEqual(values.tolist(), [100.0, 100.0])
+        self.assertEqual(self.calibration.anomaly_percentile(float("nan")), 100.0)
+
     def test_missing_file_returns_none(self):
         path = make_temp_dir()
         try:
