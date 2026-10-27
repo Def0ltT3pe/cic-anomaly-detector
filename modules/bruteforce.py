@@ -35,6 +35,12 @@ class BruteForceDetector:
     feature_cols: list[str]
     metadata: dict
 
+    @property
+    def display_name(self) -> str:
+        """Подпись в интерфейсе. adapt_model.py может заменить BruteForce-модель
+        классификатором всех атак целевой сети — тогда имя приходит из json."""
+        return str(self.metadata.get("display_name") or "BruteForce")
+
     def predict_proba(self, X: pd.DataFrame) -> np.ndarray:
         missing = [col for col in self.feature_cols if col not in X.columns]
         if missing:

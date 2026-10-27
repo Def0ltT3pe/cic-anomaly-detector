@@ -188,3 +188,12 @@ def detect_anomalies(
         threshold=calibration.threshold if calibration is not None else None,
         percentiles=percentiles,
     )
+
+
+def signed_log1p(X):
+    """sign(x)·log1p(|x|) — сжимает тяжёлые хвосты (байты/с, IAT), сохраняя знак.
+
+    Функция модуля, а не lambda: её можно положить в FunctionTransformer
+    внутри scaler.pkl, и detect_anomalies применит её без изменений кода.
+    """
+    return np.sign(X) * np.log1p(np.abs(X))

@@ -104,7 +104,7 @@ def main() -> int:
             brute_probs = brute.predict_proba(result.X)
             brute_mask = brute_probs >= brute.threshold
             print(
-                f"BruteForce-подозрений: {int(brute_mask.sum())} "
+                f"{brute.display_name}-подозрений: {int(brute_mask.sum())} "
                 f"(порог {brute.threshold:.3f})"
             )
         except BruteForceError as exc:
@@ -136,7 +136,7 @@ def main() -> int:
             handle.write(f"Порог score: <= {result.threshold:.4f}\n")
         if brute_mask is not None:
             handle.write(
-                f"BruteForce-подозрений: {int(brute_mask.sum())} "
+                f"{brute.display_name}-подозрений: {int(brute_mask.sum())} "
                 f"(порог {brute.threshold:.3f})\n"
             )
         if result.info.get("inf_replaced") or result.info.get("nan_filled"):
@@ -175,7 +175,7 @@ def main() -> int:
             handle.write("=" * 80 + "\n\n")
 
         if brute_mask is not None and brute_mask.any():
-            handle.write("ПОДОЗРЕНИЯ НА BRUTEFORCE (supervised)\n")
+            handle.write(f"ПОДОЗРЕНИЯ: {brute.display_name.upper()} (supervised)\n")
             flagged = np.flatnonzero(brute_mask)
             brute_top = flagged[np.argsort(-brute_probs[flagged])][: args.max_anomalies]
             for index in brute_top:
