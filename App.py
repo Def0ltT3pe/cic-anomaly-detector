@@ -25,14 +25,21 @@ from modules.auth import (
     load_users,
 )
 from modules.bruteforce import BruteForceError, load_bruteforce
-from modules.calibration import CalibrationError, load_calibration
+from modules.calibration import CALIBRATION_FILE, CalibrationError, load_calibration
 from modules.explainer import explain_anomaly
+from modules.integrity import IntegrityError, verify_if_listed
 from modules.llm_explain import (
     LlmUnavailableError,
     is_llm_configured,
     stream_gemini_explanation,
 )
-from modules.model_loader import ModelLoadError, load_model_objects, load_normal_stats
+from modules.model_loader import (
+    STATS_FILE,
+    ModelLoadError,
+    load_model_objects,
+    load_normal_stats,
+    resolve_model_dir,
+)
 from modules.pipeline import DetectionResult, FeatureValidationError, detect_anomalies
 
 logger = logging.getLogger(__name__)
@@ -65,6 +72,16 @@ def _load_assets():
         logger.warning("BruteForce-модель не загружена: %s", exc)
         brute = None
         errors.append(f"BruteForce-модель не загружена: {exc}")
+
+    try:
+        unprotected = verify_if_listed(resolve_model_dir(), [CALIBRATION_FILE, STATS_FILE])
+    except IntegrityError:
+        unprotected = []  # несовпадение хэша уже обработано загрузчиками выше
+    if unprotected:
+        errors.append(
+            "Не защищены подписью: " + ", ".join(unprotected)
+            + " — переподпишите модели: python make_checksums.py"
+        )
 
     return model, scaler, selector, feature_cols, means, stds, calibration, brute, errors
 

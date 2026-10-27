@@ -13,7 +13,7 @@ from __future__ import annotations
 import os
 import time
 
-DEFAULT_MODEL = "gemini-2.5-flash"
+DEFAULT_MODEL = "gemini-3.8-flash"
 REQUEST_TIMEOUT_SECONDS = 60
 ATTEMPTS = 3
 

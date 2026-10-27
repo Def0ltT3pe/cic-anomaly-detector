@@ -28,6 +28,8 @@ MODEL_ARTIFACTS = [
     "feature_cols_filtered.pkl",
     "bruteforce.pkl",
     "bruteforce.json",
+    "calibration.json",
+    "normal_stats.json",
 ]
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -235,12 +237,12 @@ def _verify_signature(payload: dict, signature: dict, public_path: str) -> None:
         ) from exc
 
 
-def verify_checksums(model_dir: str, filenames: list[str]) -> dict | None:
-    """Проверяет подпись и хэши. None, если проверка отключена/нет файла."""
-    if os.environ.get("VERIFY_MODEL_CHECKSUMS", "1").strip() == "0":
-        return None
+def _verification_disabled() -> bool:
+    return os.environ.get("VERIFY_MODEL_CHECKSUMS", "1").strip() == "0"
 
-    model_dir = os.path.abspath(model_dir)
+
+def _load_trusted_payload(model_dir: str) -> dict | None:
+    """Читает checksums.json и проверяет подпись. None, если файла нет."""
     checksums_path = os.path.join(model_dir, CHECKSUMS_FILE)
     if not os.path.isfile(checksums_path):
         return None
@@ -269,6 +271,31 @@ def verify_checksums(model_dir: str, filenames: list[str]) -> dict | None:
             f"{CHECKSUMS_FILE} не подписан, а публичный ключ есть. "
             "Подпишите модели: python make_checksums.py"
         )
+    if not isinstance(expected, dict):
+        raise IntegrityError(f"Некорректный список файлов в {checksums_path}")
+    return payload
+
+
+def _raise_problems(problems: list[str]) -> None:
+    if problems:
+        raise IntegrityError(
+            "Проверка целостности модели не пройдена: "
+            + "; ".join(problems)
+            + ". Если модели заменены намеренно, пересчитайте и подпишите checksums: "
+            "python make_checksums.py"
+        )
+
+
+def verify_checksums(model_dir: str, filenames: list[str]) -> dict | None:
+    """Проверяет подпись и хэши. None, если проверка отключена/нет файла."""
+    if _verification_disabled():
+        return None
+
+    model_dir = os.path.abspath(model_dir)
+    payload = _load_trusted_payload(model_dir)
+    if payload is None:
+        return None
+    expected = payload["files"]
 
     problems = []
     for path in filenames:
@@ -284,11 +311,36 @@ def verify_checksums(model_dir: str, filenames: list[str]) -> dict | None:
         if actual != expected[name]:
             problems.append(f"{name}: SHA-256 не совпадает")
 
-    if problems:
-        raise IntegrityError(
-            "Проверка целостности модели не пройдена: "
-            + "; ".join(problems)
-            + ". Если модели заменены намеренно, пересчитайте и подпишите checksums: "
-            "python make_checksums.py"
-        )
+    _raise_problems(problems)
     return payload
+
+
+def verify_if_listed(model_dir: str, filenames: list[str]) -> list[str]:
+    """Проверяет файлы, перечисленные в checksums.json.
+
+    Для конфигов (calibration.json, normal_stats.json), которые старые
+    checksums.json не покрывают: запись есть — хэш обязан совпасть, записи
+    нет — файл возвращается в списке незащищённых, а не блокирует загрузку.
+    """
+    if _verification_disabled():
+        return []
+
+    model_dir = os.path.abspath(model_dir)
+    present = [
+        name for name in filenames if os.path.isfile(os.path.join(model_dir, name))
+    ]
+    payload = _load_trusted_payload(model_dir)
+    if payload is None:
+        return present
+    expected = payload["files"]
+
+    problems = []
+    unprotected = []
+    for name in present:
+        if name not in expected:
+            unprotected.append(name)
+        elif sha256_file(os.path.join(model_dir, name)) != expected[name]:
+            problems.append(f"{name}: SHA-256 не совпадает")
+
+    _raise_problems(problems)
+    return unprotected

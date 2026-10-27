@@ -17,7 +17,7 @@ import joblib
 import numpy as np
 import pandas as pd
 
-from modules.integrity import IntegrityError, verify_checksums
+from modules.integrity import IntegrityError, verify_checksums, verify_if_listed
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEFAULT_MODEL_DIR = os.path.join(BASE_DIR, "models")
@@ -177,6 +177,12 @@ def load_normal_stats(
     stats_path = os.path.join(model_dir, STATS_FILE)
 
     if os.path.isfile(stats_path) and not rebuild:
+        try:
+            # Средние идут в заполнение пропусков, поэтому подмена файла
+            # меняет признаки на входе модели — проверяем, если он подписан.
+            verify_if_listed(model_dir, [STATS_FILE])
+        except IntegrityError as exc:
+            raise ModelLoadError(str(exc)) from exc
         try:
             return _read_stats_file(stats_path, feature_cols)
         except (KeyError, ValueError, TypeError) as exc:
