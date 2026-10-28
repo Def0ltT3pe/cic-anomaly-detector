@@ -1,9 +1,11 @@
 import unittest
+from unittest.mock import patch
 
+import numpy as np
 import pandas as pd
 
 from modules.model_loader import load_model_objects
-from pcap_to_flows import FLOW_TIMEOUT_US, META_COLUMNS, build_flows
+from pcap_to_flows import FLOW_TIMEOUT_US, META_COLUMNS, build_flows, drop_short_flows
 
 COLUMNS = [
     "frame_time_epoch", "ip_src", "ip_dst", "ipv6_src", "ipv6_dst", "ip_proto", "ipv6_nxt",
@@ -89,6 +91,28 @@ class BuildFlowsTests(unittest.TestCase):
         flow = build_flows(frame([udp(0, "10.0.0.5", "10.0.0.6", 1, 2, 10)])).iloc[0]
         self.assertEqual(flow["Flow Duration"], 0)
         self.assertEqual(flow["Flow Bytes/s"], float("inf"))
+
+    def test_short_flows_are_dropped(self):
+        rows = [udp(0, "10.0.0.5", "10.0.0.6", 1, 2, 10)]                     # 1 пакет
+        rows += [udp(1, "10.0.0.7", "10.0.0.6", 3, 4, 10)] * 2                # дубль: 0 мкс
+        rows += [udp(t, "10.0.0.8", "10.0.0.6", 5, 6, 10) for t in (2, 3)]    # нормальный
+        flows, dropped = drop_short_flows(build_flows(frame(rows)))
+        self.assertEqual(dropped, 2)
+        self.assertEqual(flows["Src IP"].tolist(), ["10.0.0.8"])
+        self.assertFalse(np.isinf(flows["Flow Bytes/s"]).any())
+
+    def test_iterator_input_and_sweep_match_dataframe(self):
+        rows = []
+        for host in range(5):  # 5 потоков, каждый дольше таймаута
+            for t in (0, 60, 125, 130):
+                rows.append(udp(t + host, f"10.0.1.{host}", "10.0.0.6", 1000 + host, 53, 20))
+        rows.sort(key=lambda r: float(r["frame_time_epoch"]))
+        reference = build_flows(frame(rows))
+        records = ({**dict.fromkeys(COLUMNS, ""), **r} for r in rows)  # генератор
+        with patch("pcap_to_flows.SWEEP_EVERY", 3):
+            streamed = build_flows(records)
+        self.assertEqual(len(reference), 10)  # каждый поток разбит таймаутом надвое
+        pd.testing.assert_frame_equal(reference, streamed)
 
     def test_has_all_model_features(self):
         flows = build_flows(frame([udp(0, "10.0.0.5", "10.0.0.6", 1, 2, 10)]))

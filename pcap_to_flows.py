@@ -8,7 +8,9 @@
 - поток закрывается через 120 с от начала (новый пакет начинает новый
   поток) и после пакета с FIN или RST;
 - Active/Idle — периоды активности, разделённые паузами > 5 с;
-- длины пакетов — полезная нагрузка (без заголовков), время — мкс.
+- длины пакетов — полезная нагрузка (без заголовков), время — мкс;
+- потоки из одного пакета и с нулевой длительностью отбрасываются (их нет
+  в датасетах CIC; --keep-short оставляет).
 
 Колонки совпадают с feature_cols модели (названия датасетов dhoogla), плюс
 служебные Src/Dst IP/Port и Timestamp для просмотра (модель их игнорирует).
@@ -35,6 +37,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -43,6 +46,7 @@ import pandas as pd
 FLOW_TIMEOUT_US = 120_000_000
 ACTIVITY_TIMEOUT_US = 5_000_000
 UDP_HEADER = 8
+SWEEP_EVERY = 100_000  # пакетов между проверками истёкших потоков
 
 TSHARK_FIELDS = [
     "frame.time_epoch",
@@ -99,24 +103,52 @@ def find_tshark(explicit: str | None = None) -> str:
     )
 
 
-def read_packets(pcap: str, tshark: str) -> pd.DataFrame:
-    """Поля TCP/UDP-пакетов из pcap через tshark."""
-    command = [tshark, "-r", pcap, "-n", "-Y", "tcp or udp", "-T", "fields",
-               "-E", "header=y", "-E", "separator=,", "-E", "quote=d", "-E", "occurrence=f"]
-    for name in TSHARK_FIELDS:
-        command += ["-e", name]
-    try:
-        completed = subprocess.run(command, capture_output=True, check=False)
-    except OSError as exc:
-        raise ConversionError(f"Не удалось запустить tshark: {exc}") from exc
-    if completed.returncode != 0:
-        message = completed.stderr.decode("utf-8", "replace").strip()
-        raise ConversionError(f"tshark завершился с ошибкой: {message[:500]}")
-    text = completed.stdout.decode("utf-8", "replace")
-    packets = pd.read_csv(io.StringIO(text), dtype=str, keep_default_na=False)
-    # itertuples() не принимает точки в именах: frame.time_epoch -> frame_time_epoch
-    packets.columns = [name.replace(".", "_") for name in packets.columns]
-    return packets
+class PacketReader:
+    """Пакеты TCP/UDP из pcap через tshark — построчно, без загрузки в память.
+
+    Захват на сервере даёт гигабайты в час (2.2 млн пакетов за 24 минуты),
+    поэтому весь вывод tshark в DataFrame не помещается в память. Итератор
+    отдаёт словари с полями TSHARK_FIELDS (точки заменены на «_»).
+
+    Обрезанный файл (скопирован во время записи) — не ошибка: прочитанные
+    пакеты обрабатываются, текст tshark остаётся в .warning.
+    """
+
+    def __init__(self, pcap: str, tshark: str):
+        self.pcap = pcap
+        self.tshark = tshark
+        self.count = 0
+        self.warning = ""
+
+    def __iter__(self):
+        command = [self.tshark, "-r", self.pcap, "-n", "-Y", "tcp or udp", "-T", "fields",
+                   "-E", "header=y", "-E", "separator=,", "-E", "quote=d",
+                   "-E", "occurrence=f"]
+        for name in TSHARK_FIELDS:
+            command += ["-e", name]
+        # stderr во временный файл: из PIPE его пришлось бы читать параллельно
+        with tempfile.TemporaryFile() as errors:
+            try:
+                process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=errors)
+            except OSError as exc:
+                raise ConversionError(f"Не удалось запустить tshark: {exc}") from exc
+            # csv требует поток с newline="" — у Popen такого параметра нет
+            stdout = io.TextIOWrapper(process.stdout, encoding="utf-8", errors="replace", newline="")
+            try:
+                rows = csv.reader(stdout)
+                header = [name.replace(".", "_") for name in next(rows, [])]
+                for values in rows:
+                    self.count += 1
+                    yield dict(zip(header, values))
+            finally:
+                stdout.close()
+                returncode = process.wait()
+            errors.seek(0)
+            message = errors.read().decode("utf-8", "replace").strip()
+        if returncode != 0:
+            if self.count == 0:
+                raise ConversionError(f"tshark завершился с ошибкой: {message[:500]}")
+            self.warning = message[:500]
 
 
 def _int(value: str, default: int = 0) -> int:
@@ -283,13 +315,21 @@ def flow_features(flow: Flow) -> dict:
     return row
 
 
-def build_flows(packets: pd.DataFrame) -> pd.DataFrame:
-    """Собирает пакеты в потоки по правилам CICFlowMeter."""
-    active: dict[tuple, Flow] = {}
-    finished: list[Flow] = []
+def build_flows(packets) -> pd.DataFrame:
+    """Собирает пакеты в потоки по правилам CICFlowMeter.
 
-    for row in packets.itertuples(index=False):
-        record = row._asdict()
+    packets — DataFrame или итератор словарей (PacketReader) с полями tshark.
+    """
+    active: dict[tuple, Flow] = {}
+    rows: list[dict] = []
+    if isinstance(packets, pd.DataFrame):
+        packets = packets.to_dict("records")
+
+    def finish(flow: Flow) -> None:
+        # Признаки сразу, а пакеты потока — в сборщик мусора
+        rows.append(flow_features(flow))
+
+    for number, record in enumerate(packets, start=1):
         src = record["ip_src"] or record["ipv6_src"]
         dst = record["ip_dst"] or record["ipv6_dst"]
         proto = _int(record["ip_proto"] or record["ipv6_nxt"])
@@ -310,7 +350,7 @@ def build_flows(packets: pd.DataFrame) -> pd.DataFrame:
         key = (proto,) + tuple(sorted([(src, sport), (dst, dport)]))
         flow = active.get(key)
         if flow is not None and time_us - flow.start > FLOW_TIMEOUT_US:
-            finished.append(active.pop(key))
+            finish(active.pop(key))
             flow = None
         if flow is None:
             flow = Flow(src, dst, sport, dport, proto, start=time_us)
@@ -318,14 +358,35 @@ def build_flows(packets: pd.DataFrame) -> pd.DataFrame:
         is_forward = (src, sport) == (flow.src, flow.sport)
         flow.add(time_us, is_forward, payload, header, flags, window)
         if flags & (FIN | RST):
-            finished.append(active.pop(key))
+            finish(active.pop(key))
 
-    finished.extend(active.values())
-    rows = [flow_features(flow) for flow in finished]
+        # Как CICFlowMeter: периодически закрываем истёкшие потоки, иначе на
+        # сервере с тысячами соединений они копятся в памяти до конца файла
+        if number % SWEEP_EVERY == 0:
+            expired = [k for k, f in active.items() if time_us - f.start > FLOW_TIMEOUT_US]
+            for expired_key in expired:
+                finish(active.pop(expired_key))
+
+    for flow in active.values():
+        finish(flow)
     if not rows:
         raise ConversionError("В захвате нет TCP/UDP-потоков.")
     frame = pd.DataFrame(rows).sort_values("Timestamp", kind="stable").reset_index(drop=True)
     return frame
+
+
+def drop_short_flows(flows: pd.DataFrame) -> tuple[pd.DataFrame, int]:
+    """Убирает потоки из одного пакета и с нулевой длительностью.
+
+    В датасетах CIC (CIC-IDS2017, CSE-CIC-IDS2018 в версии dhoogla) таких
+    потоков нет вовсе, поэтому модели их не видели. У них бесконечные
+    скорости, и pipeline подставляет среднее нормы — разное у разных моделей,
+    из-за чего одни и те же потоки то помечаются, то нет. На реальном
+    захвате это были ~34% потоков: «хвосты» TCP после FIN/RST и одиночные UDP.
+    """
+    packets = flows["Total Fwd Packets"] + flows["Total Backward Packets"]
+    keep = (packets >= 2) & (flows["Flow Duration"] > 0)
+    return flows[keep].reset_index(drop=True), int((~keep).sum())
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -333,6 +394,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("pcap", nargs="+", help="Файлы .pcap/.pcapng")
     parser.add_argument("--output", required=True, help="CSV или Parquet с потоками")
     parser.add_argument("--tshark", default=None, help="Путь к tshark")
+    parser.add_argument(
+        "--keep-short",
+        action="store_true",
+        help="Оставить потоки из одного пакета и с нулевой длительностью "
+        "(в датасетах CIC их нет, модели на них не обучались)",
+    )
     parser.add_argument(
         "--no-meta",
         action="store_true",
@@ -349,9 +416,15 @@ def main() -> int:
         for path in args.pcap:
             if not os.path.isfile(path):
                 raise ConversionError(f"Файл не найден: {path}")
-            packets = read_packets(path, tshark)
+            packets = PacketReader(path, tshark)
             flows = build_flows(packets)
-            print(f"{os.path.basename(path)}: пакетов TCP/UDP {len(packets):,}, потоков {len(flows):,}")
+            message = f"{os.path.basename(path)}: пакетов TCP/UDP {packets.count:,}, потоков {len(flows):,}"
+            if packets.warning:
+                print(f"ВНИМАНИЕ ({os.path.basename(path)}): {packets.warning}")
+            if not args.keep_short:
+                flows, dropped = drop_short_flows(flows)
+                message += f", из них коротких (1 пакет / 0 мкс) отброшено {dropped:,}"
+            print(message)
             frames.append(flows)
     except ConversionError as exc:
         print(f"Ошибка: {exc}")
