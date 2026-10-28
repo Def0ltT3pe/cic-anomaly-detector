@@ -137,6 +137,12 @@ class AdaptModelTests(unittest.TestCase):
         self.assertEqual(result["evaluation"]["supervised"]["mode"], "recalibrated")
         self.assertEqual(result["evaluation"]["supervised"]["display_name"], "BruteForce")
 
+    def test_unlabeled_recalibration_never_lowers_threshold(self):
+        result = self._run([self.target], brute_target_fpr=0.5)  # квантиль заведомо ниже
+        brute = load_bruteforce(self.out)
+        self.assertGreaterEqual(brute.threshold, 0.5)  # базовый порог в _write_base
+        self.assertEqual(result["evaluation"]["supervised"]["mode"], "recalibrated")
+
     def test_output_dir_is_a_working_model(self):
         self._run([self.target], log1p=True)
         model, scaler, selector, cols = load_model_objects(self.out)

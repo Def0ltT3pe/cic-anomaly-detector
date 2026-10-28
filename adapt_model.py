@@ -414,6 +414,12 @@ def adapt(args) -> dict:
                 "отделяется от атак; оставлен базовый порог."
             )
             brute_threshold = base_brute.threshold
+        if mode == "recalibrated" and brute_threshold < base_brute.threshold:
+            # Без примеров атак порог можно только поднимать (убрать лишние
+            # тревоги на этой сети). Опускать его до квантиля benign — значит
+            # самим создать тревоги: на реальной сети базовая модель давала 0%,
+            # а «подогнанная» под 0.1% — 0.32% на holdout.
+            brute_threshold = base_brute.threshold
         adapted_proba = brute_model.predict_proba(X.iloc[holdout_idx][feature_cols])[:, 1]
 
         # Что на самом деле умеет итоговая модель: при перекалибровке это
