@@ -390,7 +390,7 @@ def _render_analysis(
     cols[1].metric("Аномалии (IF)", f"{result.n_anomalies:,}")
     cols[2].metric("Доля аномалий", f"{result.share:.2%}")
     if brute_mask is not None:
-        cols[3].metric("BruteForce", f"{int(brute_mask.sum()):,}")
+        cols[3].metric(brute.display_name, f"{int(brute_mask.sum()):,}")
         cols[3].caption(
             f"порог {brute.threshold:.3f} · FPR ≈ "
             f"{float(brute.metadata.get('target_fpr', 0)):.2%}"
@@ -411,17 +411,18 @@ def _render_analysis(
         st.success("Аномалий IsolationForest не обнаружено")
 
     if brute_mask is not None and brute_mask.any():
-        st.subheader("Подозрения на BruteForce (supervised)")
+        st.subheader(f"Подозрения: {brute.display_name} (supervised)")
         flagged = np.flatnonzero(brute_mask)
         top = flagged[np.argsort(-brute_probs[flagged])][:10]
         view = result.df.iloc[top].copy()
-        view["BruteForce p"] = np.round(brute_probs[top], 3)
+        view[f"{brute.display_name} p"] = np.round(brute_probs[top], 3)
         st.dataframe(view, hide_index=True)
         st.caption(
             f"Порог {brute.threshold:.3f}; модель обучена на размеченных потоках "
-            f"CICIDS. Совпадений с IF: {int((result.mask & brute_mask).sum()):,}."
+            f"{'целевой сети' if brute.metadata.get('adaptation') else 'CICIDS'}. "
+            f"Совпадений с IF: {int((result.mask & brute_mask).sum()):,}."
         )
-        with st.expander("Статистические отклонения топ-3 BruteForce"):
+        with st.expander(f"Статистические отклонения топ-3: {brute.display_name}"):
             for index in top[:3]:
                 st.markdown(f"**Строка #{int(index)}** — p={brute_probs[index]:.3f}")
                 st.code(explain_anomaly(result.X.iloc[int(index)], means, stds))
@@ -459,8 +460,10 @@ def main() -> None:
         )
     else:
         st.sidebar.caption("Порог: встроенный (contamination модели)")
+    if calibration is not None and calibration.source == "target network holdout":
+        st.sidebar.caption("Модель адаптирована под целевую сеть (adapt_model.py)")
     st.sidebar.caption(
-        "BruteForce: " + ("supervised" if brute is not None else "нет модели")
+        (f"{brute.display_name}: supervised" if brute is not None else "Supervised: нет модели")
     )
     st.sidebar.caption(
         "ИИ: " + ("подключён" if is_llm_configured() else "не настроен (GEMINI_API_KEY)")
