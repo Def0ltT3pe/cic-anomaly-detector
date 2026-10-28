@@ -31,6 +31,7 @@ calibrate_model.py          расчёт порога по benign-трафику
 train_model_v2.py           эксперимент: обучение на benign нескольких дней
 train_bruteforce.py         обучение supervised-детектора BruteForce
 adapt_model.py              дообучение и калибровка под трафик целевой сети
+pcap_to_flows.py            pcap/pcapng -> признаки потоков CICFlowMeter (через tshark)
 evaluate.py                 кросс-датасетная оценка (обучение на одной сети, тест на другой)
 make_checksums.py           SHA-256 + Ed25519-подпись моделей
 manage_users.py             пользователи и роли (PBKDF2)
@@ -300,10 +301,27 @@ AUC (CSE-CIC-IDS2018 и CIC-DDoS2019 — сети, которых модель �
 модель подстраивается под сеть:
 
 ```bash
-# CSV/Parquet от CICFlowMeter с той же сети
+# захват Wireshark -> признаки потоков (нужен tshark из состава Wireshark)
+python pcap_to_flows.py capture.pcapng --output site/flows.parquet
+# или CSV/Parquet от CICFlowMeter с той же сети
 python adapt_model.py --data site/*.parquet --output-dir models_site
 MODEL_DIR=models_site streamlit run App.py
 ```
+
+`pcap_to_flows.py` считает те же 67 признаков по правилам CICFlowMeter
+(двунаправленный поток, таймаут 120 с, закрытие по FIN/RST, Active/Idle
+с порогом 5 с), но не копирует баги старого CICFlowMeter из CIC-IDS2017
+(например, «заголовок» UDP 20/32 байта): базовая модель на них ведёт себя
+как на чужой сети, а для адаптации важно, что обучение и применение идут
+через один и тот же конвертер. CSV-экспорт списка пакетов из Wireshark
+(File → Export Packet Dissections) не подходит — нужен сам .pcap/.pcapng.
+В выходном файле есть Src/Dst IP и порты; `--no-meta` их убирает.
+
+Проверено на 77-минутном захвате реальной Wi-Fi-сети (12 359 потоков, 74% —
+mDNS/LLMNR/SSDP): базовая модель помечала 6.7% потоков при целевых 2%,
+после адаптации — 2.0% на последних 20% захвата. Supervised-модель без меток
+только перекалибровывается: порог можно поднять, но не опустить ниже
+базового.
 
 - IsolationForest переобучается на benign целевой сети; порог и
   `normal_stats.json` — по отложенной части того же трафика.

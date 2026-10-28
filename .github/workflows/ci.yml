@@ -35,7 +35,7 @@ jobs:
           python -m compileall -q \
             App.py detector.py calibrate_model.py manage_users.py \
             make_checksums.py train_bruteforce.py train_model_v2.py \
-            adapt_model.py evaluate.py \
+            adapt_model.py evaluate.py pcap_to_flows.py \
             modules tests
 
       - name: Unit tests
