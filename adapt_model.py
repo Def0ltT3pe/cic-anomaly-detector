@@ -111,7 +111,22 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="sign·log1p перед StandardScaler: выше AUC, но ниже recall при малом FPR",
     )
-    parser.add_argument("--n-estimators", type=int, default=100)
+    parser.add_argument("--n-estimators", type=int, default=100, help="Деревьев в IsolationForest")
+    # Подобрано на CSE-CIC-IDS2018 (1.2 млн потоков): по сравнению с прежними
+    # 60 деревьями глубины 12 пропусков атак (без Infiltration) при FPR 0.1%
+    # меньше в ~2.5 раза (1.7% -> 0.7%), модель ~36 МБ вместо ~4.5 МБ.
+    # Без ограничения глубины точнее ещё на 0.3 п.п., но весит ~213 МБ.
+    parser.add_argument("--rf-trees", type=int, default=100, help="Деревьев в supervised RF")
+    parser.add_argument(
+        "--rf-depth", type=int, default=20, help="Макс. глубина RF (0 — без ограничения)"
+    )
+    parser.add_argument("--rf-leaf", type=int, default=5, help="min_samples_leaf у RF")
+    parser.add_argument(
+        "--rf-max-samples",
+        type=float,
+        default=0.5,
+        help="Доля строк в бутстрепе каждого дерева (меньше — быстрее и легче модель)",
+    )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--n-jobs", type=int, default=-1)
     return parser
@@ -358,11 +373,20 @@ def adapt(args) -> dict:
             mode = "retrained"
             display_name = CLASSIFIER_NAMES[args.classifier]
             train_rows_rf = np.flatnonzero(~is_holdout)
+            rf_params = {
+                "n_estimators": args.rf_trees,
+                "max_depth": args.rf_depth or None,
+                "min_samples_leaf": args.rf_leaf,
+                "max_samples": args.rf_max_samples,
+                "class_weight": "balanced_subsample",
+                "seed": args.seed,
+            }
             brute_model = RandomForestClassifier(
-                n_estimators=60,
-                max_depth=12,
-                min_samples_leaf=10,
-                class_weight="balanced_subsample",
+                n_estimators=rf_params["n_estimators"],
+                max_depth=rf_params["max_depth"],
+                min_samples_leaf=rf_params["min_samples_leaf"],
+                max_samples=rf_params["max_samples"],
+                class_weight=rf_params["class_weight"],
                 n_jobs=args.n_jobs,
                 random_state=args.seed,
             ).fit(X.iloc[train_rows_rf][feature_cols], positive[train_rows_rf].astype(int))
@@ -372,6 +396,7 @@ def adapt(args) -> dict:
             mode = "recalibrated"
             display_name = base_brute.display_name
             brute_model = base_brute.model
+            rf_params = base_brute.metadata.get("params")
             # Модель эту сеть не видела — порог по benign train, holdout честный
             calib_rows = benign_train
             if labeled and args.classifier == "all":
@@ -442,6 +467,7 @@ def adapt(args) -> dict:
                 "target_files": [os.path.basename(path) for path in files],
                 "positive_train_rows": positive_train,
             },
+            "params": rf_params,
             "note": (
                 "Адаптировано под целевую сеть: "
                 + (
@@ -458,7 +484,9 @@ def adapt(args) -> dict:
     os.makedirs(output_dir, exist_ok=True)
     created_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
 
-    joblib.dump(model, os.path.join(output_dir, "isolation_forest.pkl"))
+    # Сжатие: RF по умолчанию ~109 МБ без него и ~36 МБ с compress=3
+    # (больше лимита GitHub на файл); joblib.load распаковывает сам.
+    joblib.dump(model, os.path.join(output_dir, "isolation_forest.pkl"), compress=3)
     joblib.dump(scaler, os.path.join(output_dir, "scaler.pkl"))
     joblib.dump(list(cols), os.path.join(output_dir, "feature_cols_filtered.pkl"))
     _write_json(
@@ -488,7 +516,7 @@ def adapt(args) -> dict:
         },
     )
     if brute_payload is not None:
-        joblib.dump(brute_model, os.path.join(output_dir, "bruteforce.pkl"))
+        joblib.dump(brute_model, os.path.join(output_dir, "bruteforce.pkl"), compress=3)
         _write_json(os.path.join(output_dir, "bruteforce.json"), brute_payload)
 
     metadata = {
@@ -570,6 +598,12 @@ def main() -> int:
             return 2
     if not 0.0 <= args.trim < 0.5:
         print("Ошибка: --trim должен быть в диапазоне [0, 0.5).")
+        return 2
+    if args.rf_trees < 1 or args.rf_depth < 0 or args.rf_leaf < 1:
+        print("Ошибка: --rf-trees и --rf-leaf должны быть ≥ 1, --rf-depth ≥ 0.")
+        return 2
+    if not 0.0 < args.rf_max_samples <= 1.0:
+        print("Ошибка: --rf-max-samples должен быть в диапазоне (0, 1].")
         return 2
 
     try:

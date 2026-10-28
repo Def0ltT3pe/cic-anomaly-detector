@@ -88,6 +88,10 @@ def _args(**overrides):
         trim=0.0,
         log1p=False,
         n_estimators=50,
+        rf_trees=20,
+        rf_depth=20,
+        rf_leaf=5,
+        rf_max_samples=0.5,
         seed=0,
         n_jobs=1,
     )
@@ -173,7 +177,11 @@ class AdaptModelTests(unittest.TestCase):
         self.assertGreater(block["adapted"]["recall"], 0.9)
         self.assertLessEqual(block["adapted"]["fpr"], 0.05)
         self.assertEqual(set(block["adapted"]["families"]), {"BruteForce", "DoS"})
-        self.assertEqual(load_bruteforce(self.out).display_name, "Атаки")
+        brute = load_bruteforce(self.out)
+        self.assertEqual(brute.display_name, "Атаки")
+        self.assertEqual(brute.metadata["params"]["n_estimators"], 20)
+        self.assertEqual(brute.model.max_depth, 20)
+        self.assertEqual(brute.model.max_samples, 0.5)
         self.assertEqual(result["coverage"]["DoS"]["train"] + result["coverage"]["DoS"]["holdout"], 400)
         self.assertEqual(result["unchecked_families"], [])
         # IsolationForest учится только на benign
@@ -190,6 +198,10 @@ class AdaptModelTests(unittest.TestCase):
         frame = self._labeled().sort_values("Label", key=lambda s: s != "SSH-Patator")
         result = self._run([frame])  # брутфорс в начале файла -> не в time-holdout
         self.assertIn("BruteForce", result["unchecked_families"])
+
+    def test_rf_depth_zero_means_unlimited(self):
+        self._run([self._labeled()], rf_depth=0)
+        self.assertIsNone(load_bruteforce(self.out).model.max_depth)
 
     def test_trim_drops_rows(self):
         result = self._run([self.target], trim=0.05)
