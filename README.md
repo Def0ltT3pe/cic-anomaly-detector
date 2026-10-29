@@ -34,6 +34,7 @@ adapt_model.py              дообучение и калибровка под 
 pcap_to_flows.py            pcap/pcapng -> признаки потоков CICFlowMeter (через tshark)
 label_from_authlog.py       разметка SSH-потоков по журналу sshd (брутфорс/сканеры/норма)
 collect_capture.sh          сбор на сервере: захват с контролем места + журнал SSH
+pull_captures.ps1           Windows: регулярно забирает новые файлы сбора с серверов
 evaluate.py                 кросс-датасетная оценка (обучение на одной сети, тест на другой)
 make_checksums.py           SHA-256 + Ed25519-подпись моделей
 manage_users.py             пользователи и роли (PBKDF2)
@@ -363,6 +364,24 @@ mDNS/LLMNR/SSDP, во втором 55% — HTTPS). Доля помеченных
    `capture_*.pcapng`, `ssh_*.log` и `session.json` (интерфейс, зона, время,
    статус). Скопировать: `scp -r root@SERVER:/var/lib/cic-capture/<сессия> .`
    Каталог создаётся с правами 700: в захвате и журнале — адреса и логины.
+
+   Кольцо перезаписывает старые файлы, поэтому, если диск мал, их нужно
+   забирать чаще, чем оно заполняется (`status` через час покажет темп).
+   На Windows это делает `pull_captures.ps1` из Планировщика задач:
+   по SSH получает список файлов, пропускает файл, который ещё пишется,
+   и скачивает только новые/недокачанные (через `.part` с проверкой
+   размера). Нужен вход по SSH-ключу:
+   ```powershell
+   ssh-keygen -t ed25519                                   # один раз, Enter на все вопросы
+   type $env:USERPROFILE\.ssh\id_ed25519.pub | ssh root@SERVER "mkdir -p ~/.ssh && cat >> ~/.ssh/authorized_keys"
+   ssh -o BatchMode=yes root@SERVER true                   # должно пройти без пароля
+   copy pull_captures.example.json pull_captures.json      # вписать серверы и папки
+   .\pull_captures.ps1 -DryRun                             # что будет скачано
+   .\pull_captures.ps1 -Install -EveryHours 2              # задача в Планировщике
+   ```
+   Журнал — `pull.log` рядом со скриптом; удалить задачу —
+   `.\pull_captures.ps1 -Uninstall`. `pull_captures.json` (адреса серверов)
+   в репозиторий не попадает.
 3. Потоки и разметка: в журнале sshd есть адрес и порт клиента, поэтому
    SSH-потоки сопоставляются с сессиями точно. Неудачный пароль —
    `SSH-Bruteforce`, подключение без попытки входа — `SSH-Probe`, успешный
