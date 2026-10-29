@@ -13,6 +13,13 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 if BASE_DIR not in sys.path:
     sys.path.insert(0, BASE_DIR)
 
+from modules.alerts import (
+    DEFAULT_IMMEDIATE_PORTS,
+    DEFAULT_MIN_FLOWS,
+    DEFAULT_WINDOW,
+    aggregate_alerts,
+    summarize,
+)
 from modules.bruteforce import BruteForceError, load_bruteforce
 from modules.calibration import CalibrationError, load_calibration
 from modules.explainer import explain_anomaly
@@ -42,6 +49,15 @@ def build_parser() -> argparse.ArgumentParser:
         default=20,
         help="Сколько аномалий описать в отчёте (>= 1)",
     )
+    parser.add_argument("--alert-window", default=DEFAULT_WINDOW,
+                        help="Окно агрегации тревог в инциденты (pandas: 1h, 30min, 1D)")
+    parser.add_argument("--alert-min-flows", type=int, default=DEFAULT_MIN_FLOWS,
+                        help="Сколько подозрительных потоков от адреса за окно — инцидент")
+    parser.add_argument("--alert-ports", default=",".join(map(str, DEFAULT_IMMEDIATE_PORTS)),
+                        help="Порты сервера, где один подозрительный поток — уже инцидент "
+                        "(через запятую; пусто — отключить)")
+    parser.add_argument("--local-ip", default=None,
+                        help="Адрес защищаемого хоста (по умолчанию — самый частый в данных)")
     return parser
 
 
@@ -110,6 +126,19 @@ def main() -> int:
         except BruteForceError as exc:
             print(f"ВНИМАНИЕ: BruteForce-модель не применилась: {exc}")
 
+    incidents = None
+    if brute_mask is not None:
+        try:
+            ports = [int(p) for p in args.alert_ports.split(",") if p.strip()]
+            incidents = aggregate_alerts(
+                result.df, brute_mask, brute_probs,
+                window=args.alert_window, min_flows=args.alert_min_flows,
+                immediate_ports=ports, local_ip=args.local_ip,
+            )
+        except ValueError as exc:
+            print(f"ВНИМАНИЕ: инциденты не собраны: {exc}")
+        print("Инциденты: " + summarize(incidents, brute_mask))
+
     explainer = None
     if args.use_llm:
         try:
@@ -144,7 +173,22 @@ def main() -> int:
                 f"Заменено inf: {result.info.get('inf_replaced', 0)}, "
                 f"пропусков: {result.info.get('nan_filled', 0)}\n"
             )
+        if brute_mask is not None:
+            handle.write("Инциденты: " + summarize(incidents, brute_mask) + "\n")
         handle.write("\n")
+
+        if incidents is not None and len(incidents):
+            handle.write(
+                f"ИНЦИДЕНТЫ: {brute.display_name} по адресу за {args.alert_window} "
+                f"(порт {args.alert_ports or '—'} сразу, иначе ≥{args.alert_min_flows} потоков)\n"
+            )
+            for incident in incidents.itertuples():
+                handle.write(
+                    f"{incident.window_start:%Y-%m-%d %H:%M}  {incident.peer:<39} "
+                    f"потоков {incident.flows:>4}  порты {incident.services:<16} "
+                    f"p≤{incident.max_proba:.2f}  {incident.reason}\n"
+                )
+            handle.write("=" * 80 + "\n\n")
 
         for index in selected:
             index = int(index)
