@@ -59,7 +59,7 @@ class LabelFlowsTests(unittest.TestCase):
             ("198.51.100.7", 1803, "10.0.0.1", 22, "2026-10-28 19:09:00"),  # тот же, после таймаута
             ("203.0.113.5", 21987, "10.0.0.1", 22, "2026-10-28 19:17:37"),  # сканер
             ("192.0.2.99", 5555, "10.0.0.1", 22, "2026-10-28 19:30:00"),    # нет в журнале
-            ("10.0.0.1", 22, "192.0.2.10", 46438, "2026-10-28 19:01:55"),   # исходящий с 22 — не входящий
+            ("10.0.0.1", 22, "192.0.2.10", 46438, "2026-10-28 19:01:55"),   # та же сессия бота, первый пакет от сервера
             ("10.0.0.1", 50000, "93.184.216.34", 443, "2026-10-28 19:00:00"),
         ])
 
@@ -67,10 +67,21 @@ class LabelFlowsTests(unittest.TestCase):
         labeled, summary = label_flows(self.frame, self.sessions)
         self.assertEqual(
             labeled["Label"].tolist(),
-            ["SSH-Bruteforce", "Benign", "Benign", "SSH-Probe", "Benign", "Benign"],
+            ["SSH-Bruteforce", "Benign", "Benign", "SSH-Probe", "SSH-Bruteforce", "Benign"],
         )
         self.assertEqual(summary["unlogged_flows"], 1)
         self.assertEqual(summary["sessions_matched"], 3)
+
+    def test_flow_starting_from_server_side_is_ssh(self):
+        # Продолжение сессии бота после таймаута: первый пакет от сервера
+        reverse = flows([("10.0.0.1", 22, "192.0.2.10", 46438, "2026-10-28 19:01:59")])
+        labeled, summary = label_flows(reverse, self.sessions, unlogged="keep")
+        self.assertEqual(labeled["Label"].tolist(), ["SSH-Bruteforce"])
+        self.assertEqual(summary["inbound_ssh_flows"], 1)
+        # Такой же поток без записи в журнале — не «норма», а неопределённый
+        unknown = flows([("10.0.0.1", 22, "192.0.2.77", 5555, "2026-10-28 19:30:00")])
+        labeled, _ = label_flows(unknown, self.sessions, unlogged="keep")
+        self.assertEqual(labeled["Label"].tolist(), ["SSH-Unlogged"])
 
     def test_unlogged_modes(self):
         kept, _ = label_flows(self.frame, self.sessions, unlogged="keep")

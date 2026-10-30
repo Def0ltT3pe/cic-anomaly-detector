@@ -32,6 +32,7 @@ import re
 import sys
 from dataclasses import dataclass, field
 
+import numpy as np
 import pandas as pd
 
 LABELS = {"failed": "SSH-Bruteforce", "probe": "SSH-Probe", "accepted": "Benign"}
@@ -137,10 +138,10 @@ def label_flows(
     unlogged: str = "drop",
 ) -> tuple[pd.DataFrame, dict]:
     """Ставит Label по сессиям журнала. Возвращает (потоки, сводку)."""
-    required = {"Src IP", "Src Port", "Dst Port", "Timestamp"}
+    required = {"Src IP", "Src Port", "Dst IP", "Dst Port", "Timestamp"}
     if not required <= set(flows.columns):
         raise AuthLogError(
-            "В потоках нет Src IP/Src Port/Dst Port/Timestamp — сконвертируйте pcap "
+            "В потоках нет Src/Dst IP, портов или Timestamp — сконвертируйте pcap "
             "без --no-meta."
         )
     by_key: dict[tuple[str, int], list[Session]] = {}
@@ -151,12 +152,20 @@ def label_flows(
     timestamps = pd.to_datetime(flows["Timestamp"])
     if timestamps.dt.tz is not None:
         timestamps = timestamps.dt.tz_convert("UTC").dt.tz_localize(None)
-    inbound = (flows["Dst Port"] == ssh_port).to_numpy()
+    # Клиент SSH — сторона с портом не ssh_port. Поток может начаться и с
+    # пакета сервера (продолжение сессии после 120-секундного таймаута или
+    # «хвост» после FIN): тогда Src Port = 22, а клиент — Dst IP/Dst Port.
+    # Раньше такие потоки считались не-SSH и получали Benign.
+    to_server = (flows["Dst Port"] == ssh_port).to_numpy()
+    from_server = (flows["Src Port"] == ssh_port).to_numpy() & ~to_server
+    inbound = to_server | from_server
+    client_ip = np.where(from_server, flows["Dst IP"].astype(str), flows["Src IP"].astype(str))
+    client_port = np.where(from_server, flows["Dst Port"], flows["Src Port"])
 
     labels = ["Benign"] * len(flows)
     matched_sessions: set[str] = set()
     for row, (ip, port, stamp, is_inbound) in enumerate(
-        zip(flows["Src IP"], flows["Src Port"], timestamps, inbound)
+        zip(client_ip, client_port, timestamps, inbound)
     ):
         if not is_inbound:
             continue
