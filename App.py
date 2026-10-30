@@ -16,6 +16,13 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 if BASE_DIR not in sys.path:
     sys.path.insert(0, BASE_DIR)
 
+from modules.alerts import (
+    DEFAULT_IMMEDIATE_PORTS,
+    DEFAULT_MIN_FLOWS,
+    aggregate_alerts,
+    parse_trusted,
+    summarize,
+)
 from modules.audit import log_event, read_recent
 from modules.auth import (
     AuthError,
@@ -373,6 +380,48 @@ def _compute_brute(result: DetectionResult, brute):
         return None
 
 
+def _render_incidents(result: DetectionResult, brute, brute_probs, brute_mask) -> None:
+    """Подозрительные потоки, сведённые в инциденты по внешнему адресу за час."""
+    try:
+        trusted = parse_trusted(os.environ.get("TRUSTED_IPS", ""))
+    except ValueError as exc:
+        st.warning(f"TRUSTED_IPS не разобран ({exc}) — доверенных адресов нет.")
+        trusted = []
+    incidents = aggregate_alerts(result.df, brute_mask, brute_probs, trusted=trusted)
+    if incidents is None:
+        st.caption(
+            "Инциденты по адресам не собраны: в файле нет Src/Dst IP и портов "
+            "(их добавляет pcap_to_flows.py)."
+        )
+        return
+    st.subheader(f"Инциденты: {brute.display_name}")
+    if not len(incidents):
+        st.success(
+            "Подозрительные потоки есть, но ни один адрес не дал инцидента: "
+            "единичные срабатывания, скорее всего ложные."
+        )
+        return
+    view = incidents.drop(columns=["rows"]).rename(
+        columns={
+            "window_start": "Час",
+            "peer": "Адрес",
+            "flows": "Потоков",
+            "services": "Порты сервера",
+            "max_proba": "Макс. p",
+            "first_seen": "Первый",
+            "last_seen": "Последний",
+            "reason": "Почему инцидент",
+        }
+    )
+    st.dataframe(view, hide_index=True)
+    st.caption(
+        f"{summarize(incidents, brute_mask)}. Инцидент — поток на порт "
+        f"{', '.join(map(str, DEFAULT_IMMEDIATE_PORTS))} или ≥{DEFAULT_MIN_FLOWS} "
+        "подозрительных потоков с одного адреса за час; единичные срабатывания "
+        "на других портах — почти всегда ложные."
+    )
+
+
 def _render_analysis(
     result: DetectionResult,
     means,
@@ -411,6 +460,7 @@ def _render_analysis(
         st.success("Аномалий IsolationForest не обнаружено")
 
     if brute_mask is not None and brute_mask.any():
+        _render_incidents(result, brute, brute_probs, brute_mask)
         st.subheader(f"Подозрения: {brute.display_name} (supervised)")
         flagged = np.flatnonzero(brute_mask)
         top = flagged[np.argsort(-brute_probs[flagged])][:10]

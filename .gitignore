@@ -19,3 +19,6 @@ REVIEW.md
 keys/
 config/users.json
 audit/
+
+# адреса серверов для pull_captures.ps1
+pull_captures.json

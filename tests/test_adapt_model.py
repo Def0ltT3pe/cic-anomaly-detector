@@ -75,6 +75,7 @@ def _write_base(directory: str) -> None:
 def _args(**overrides):
     defaults = dict(
         data=[],
+        test_data=[],
         output_dir="",
         base_dir="",
         force=False,
@@ -208,6 +209,29 @@ class AdaptModelTests(unittest.TestCase):
     def test_rf_depth_zero_means_unlimited(self):
         self._run([self._labeled()], rf_depth=0)
         self.assertIsNone(load_bruteforce(self.out).model.max_depth)
+
+    def test_separate_test_files_are_evaluated(self):
+        train = self._labeled()
+        test_path = os.path.join(self.dir, "day2.csv")
+        rng = np.random.default_rng(5)
+        day2 = pd.concat([
+            _benign(rng, 2000, scale=1000.0).assign(Label="Benign"),
+            _brute(rng, 200, scale=1000.0).assign(Label="SSH-Bruteforce"),
+        ])
+        day2.to_csv(test_path, index=False)
+        result = self._run([train], test_data=[test_path])
+        test = result["evaluation_test"]
+        self.assertEqual(test["files"], ["day2.csv"])
+        self.assertEqual(test["supervised"]["adapted"]["attacks"], 200)
+        self.assertGreater(test["supervised"]["adapted"]["recall"], 0.9)
+        self.assertLess(test["isolation_forest"]["adapted"]["fpr"], 0.1)
+        with open(os.path.join(self.out, "metadata.json"), encoding="utf-8") as handle:
+            self.assertIn("evaluation_test", json.load(handle))
+
+    def test_test_data_must_not_overlap_training(self):
+        path = os.path.join(self.dir, "target0.csv")
+        with self.assertRaises(AdaptationError):
+            self._run([self.target], test_data=[path])
 
     def test_trim_drops_rows(self):
         result = self._run([self.target], trim=0.05)

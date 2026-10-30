@@ -35,8 +35,11 @@ jobs:
           python -m compileall -q \
             App.py detector.py calibrate_model.py manage_users.py \
             make_checksums.py train_bruteforce.py train_model_v2.py \
-            adapt_model.py evaluate.py pcap_to_flows.py \
+            adapt_model.py evaluate.py pcap_to_flows.py label_from_authlog.py \
             modules tests
+
+      - name: Shell syntax check
+        run: bash -n collect_capture.sh
 
       - name: Unit tests
         env:

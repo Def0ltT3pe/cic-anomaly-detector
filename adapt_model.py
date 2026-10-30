@@ -75,6 +75,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Дообучение и калибровка под целевую сеть")
     parser.add_argument("--data", nargs="+", required=True, help="CSV/Parquet целевой сети")
     parser.add_argument("--output-dir", required=True, help="Каталог новой модели")
+    parser.add_argument(
+        "--test-data",
+        nargs="+",
+        default=[],
+        help="Файлы для проверки, не участвующие в обучении и калибровке — например, "
+        "последний день записи. Это честнее holdout из тех же файлов: так модель "
+        "будет работать завтра.",
+    )
     parser.add_argument("--base-dir", default=None, help="Базовая модель (по умолчанию models/)")
     parser.add_argument("--force", action="store_true", help="Перезаписать --output-dir")
     parser.add_argument("--label-column", default="Label")
@@ -484,6 +492,61 @@ def adapt(args) -> dict:
             ),
         }
 
+    # --- Проверка на отдельных файлах (дни/часы, которых не было в обучении)
+    evaluation_test = None
+    if args.test_data:
+        test_files = _expand(args.test_data)
+        overlap = {os.path.abspath(p) for p in test_files} & {os.path.abspath(p) for p in files}
+        if overlap:
+            raise AdaptationError(
+                "--test-data пересекается с --data: "
+                + ", ".join(sorted(os.path.basename(p) for p in overlap))
+            )
+        print("Проверочные файлы (не участвуют в обучении и калибровке):")
+        t_frame, t_labels, _, t_labeled = load_target(
+            test_files, cols, args.label_column, 0.0, args.split, args.limit_per_file, args.seed
+        )
+        t_index = np.arange(len(t_frame))
+        t_X, _ = prepare_features(t_frame, cols, fill_values=means)
+        t_X_base, _ = prepare_features(t_frame, cols, fill_values=base_means)
+        t_files = pd.Series(["test"] * len(t_frame))
+        t_view = Dataset(name="test", X=t_X, labels=t_labels, files=t_files)
+        t_base_scores = _if_scores(base_model, base_scaler, base_selector, t_X_base)
+        t_scores = _if_scores(model, scaler, None, t_X)
+        evaluation_test = {
+            "files": [os.path.basename(path) for path in test_files],
+            "labeled": t_labeled,
+            "isolation_forest": {
+                "base": _summary(evaluate_scores(
+                    t_view, -t_base_scores, -base_threshold, args.target_fpr, t_index)),
+                "adapted": _summary(evaluate_scores(
+                    t_view, -t_scores, -threshold, args.target_fpr, t_index)),
+            },
+        }
+        if base_brute is not None:
+            if effective == "bruteforce":
+                t_families = t_labels.map(attack_family).to_numpy()
+                t_benign = (t_labels.str.lower() == "benign").to_numpy()
+                t_eval_labels = pd.Series(np.where(
+                    t_families == BRUTE_FAMILY, BRUTE_FAMILY,
+                    np.where(t_benign, "Benign", "Other")))
+            else:
+                t_eval_labels = t_labels
+            t_sup = Dataset(name="test", X=t_X, labels=t_eval_labels, files=t_files)
+            evaluation_test["supervised"] = {
+                "mode": mode,
+                "classifier": effective,
+                "display_name": display_name,
+                "base": _summary(evaluate_scores(
+                    t_sup, base_brute.predict_proba(t_X_base),
+                    float(np.nextafter(base_brute.threshold, -np.inf)),
+                    args.brute_target_fpr, t_index)),
+                "adapted": _summary(evaluate_scores(
+                    t_sup, brute_model.predict_proba(t_X[feature_cols])[:, 1],
+                    float(np.nextafter(brute_threshold, -np.inf)),
+                    args.brute_target_fpr, t_index)),
+            }
+
     # --- Сохранение
     if os.path.exists(output_dir) and args.force:
         shutil.rmtree(output_dir)
@@ -544,6 +607,7 @@ def adapt(args) -> dict:
         "coverage": coverage,
         "unchecked_families": unchecked,
         "evaluation": evaluation,
+        "evaluation_test": evaluation_test,
     }
     _write_json(os.path.join(output_dir, "metadata.json"), metadata)
 
@@ -635,6 +699,13 @@ def main() -> int:
     print(format_comparison(result["evaluation"]))
     if not result["labeled"]:
         print("(без меток видны только FPR: recall появится, если добавить колонку Label)")
+
+    test = result.get("evaluation_test")
+    if test:
+        print("\nПроверка на отложенных файлах (не участвовали в обучении): "
+              + ", ".join(test["files"]))
+        blocks = {k: v for k, v in test.items() if k in ("isolation_forest", "supervised")}
+        print(format_comparison(blocks))
 
     output = _display_path(result["output_dir"])
     print(f"\nСохранено в {output}")
