@@ -18,6 +18,7 @@ from modules.alerts import (
     DEFAULT_MIN_FLOWS,
     DEFAULT_WINDOW,
     aggregate_alerts,
+    parse_trusted,
     summarize,
 )
 from modules.bruteforce import BruteForceError, load_bruteforce
@@ -58,6 +59,9 @@ def build_parser() -> argparse.ArgumentParser:
                         "(через запятую; пусто — отключить)")
     parser.add_argument("--local-ip", default=None,
                         help="Адрес защищаемого хоста (по умолчанию — самый частый в данных)")
+    parser.add_argument("--trusted-ips", default=os.environ.get("TRUSTED_IPS", ""),
+                        help="Свои адреса/подсети через запятую — без инцидентов "
+                        "(например, откуда заходите по SSH); по умолчанию из TRUSTED_IPS")
     return parser
 
 
@@ -134,6 +138,7 @@ def main() -> int:
                 result.df, brute_mask, brute_probs,
                 window=args.alert_window, min_flows=args.alert_min_flows,
                 immediate_ports=ports, local_ip=args.local_ip,
+                trusted=parse_trusted(args.trusted_ips),
             )
         except ValueError as exc:
             print(f"ВНИМАНИЕ: инциденты не собраны: {exc}")

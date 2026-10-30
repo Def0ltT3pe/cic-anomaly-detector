@@ -20,6 +20,7 @@ from modules.alerts import (
     DEFAULT_IMMEDIATE_PORTS,
     DEFAULT_MIN_FLOWS,
     aggregate_alerts,
+    parse_trusted,
     summarize,
 )
 from modules.audit import log_event, read_recent
@@ -381,7 +382,12 @@ def _compute_brute(result: DetectionResult, brute):
 
 def _render_incidents(result: DetectionResult, brute, brute_probs, brute_mask) -> None:
     """Подозрительные потоки, сведённые в инциденты по внешнему адресу за час."""
-    incidents = aggregate_alerts(result.df, brute_mask, brute_probs)
+    try:
+        trusted = parse_trusted(os.environ.get("TRUSTED_IPS", ""))
+    except ValueError as exc:
+        st.warning(f"TRUSTED_IPS не разобран ({exc}) — доверенных адресов нет.")
+        trusted = []
+    incidents = aggregate_alerts(result.df, brute_mask, brute_probs, trusted=trusted)
     if incidents is None:
         st.caption(
             "Инциденты по адресам не собраны: в файле нет Src/Dst IP и портов "

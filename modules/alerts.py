@@ -21,6 +21,8 @@ pcap_to_flows.py (без --no-meta); в датасетах CIC их нет.
 
 from __future__ import annotations
 
+import ipaddress
+
 import numpy as np
 import pandas as pd
 
@@ -40,6 +42,38 @@ def detect_local_ip(df: pd.DataFrame) -> str:
     return str(addresses.value_counts().index[0])
 
 
+def parse_trusted(text: str | None) -> list:
+    """«1.2.3.4, 10.0.0.0/8» -> список сетей ipaddress (ошибка — ValueError)."""
+    networks = []
+    for item in (text or "").replace(";", ",").split(","):
+        item = item.strip()
+        if item:
+            networks.append(ipaddress.ip_network(item, strict=False))
+    return networks
+
+
+def trusted_mask(addresses, trusted) -> np.ndarray:
+    """True для адресов, попадающих в trusted (адреса, подсети или их строки)."""
+    networks = [
+        net if isinstance(net, (ipaddress.IPv4Network, ipaddress.IPv6Network))
+        else ipaddress.ip_network(str(net), strict=False)
+        for net in trusted
+    ]
+    cache: dict[str, bool] = {}
+
+    def check(address: str) -> bool:
+        if address not in cache:
+            try:
+                ip = ipaddress.ip_address(address)
+            except ValueError:
+                cache[address] = False
+            else:
+                cache[address] = any(ip.version == net.version and ip in net for net in networks)
+        return cache[address]
+
+    return np.array([check(str(address)) for address in addresses], dtype=bool)
+
+
 def aggregate_alerts(
     df: pd.DataFrame,
     flagged: np.ndarray,
@@ -48,8 +82,13 @@ def aggregate_alerts(
     min_flows: int = DEFAULT_MIN_FLOWS,
     immediate_ports=DEFAULT_IMMEDIATE_PORTS,
     local_ip: str | None = None,
+    trusted=None,
 ) -> pd.DataFrame | None:
     """Инциденты по внешнему адресу и окну. None, если в данных нет адресов.
+
+    trusted — свои адреса или подсети ("203.0.113.5", "198.51.100.0/24"):
+    свои SSH-сессии (в том числе pull_captures.ps1) иначе тоже попадали бы
+    в инциденты по правилу «поток на порт 22».
 
     Колонки результата: peer, window_start, flows, services, max_proba,
     first_seen, last_seen, reason, rows (позиционные индексы потоков).
@@ -66,6 +105,10 @@ def aggregate_alerts(
     src = df["Src IP"].astype(str).to_numpy()
     outbound = src == local_ip
     peer = np.where(outbound, df["Dst IP"].astype(str), src)
+    if trusted:
+        flagged = flagged & ~trusted_mask(peer, trusted)
+        if not flagged.any():
+            return pd.DataFrame(columns=columns)
     # Порт сервиса на стороне сервера: для входящих — Dst Port, для исходящих — Src Port
     local_port = np.where(outbound, df["Src Port"], df["Dst Port"]).astype(int)
     stamps = pd.to_datetime(df["Timestamp"])

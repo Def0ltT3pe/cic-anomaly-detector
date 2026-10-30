@@ -3,7 +3,13 @@ import unittest
 import numpy as np
 import pandas as pd
 
-from modules.alerts import aggregate_alerts, detect_local_ip, summarize
+from modules.alerts import (
+    aggregate_alerts,
+    detect_local_ip,
+    parse_trusted,
+    summarize,
+    trusted_mask,
+)
 
 SERVER = "10.0.0.1"
 
@@ -71,6 +77,15 @@ class AggregateAlertsTests(unittest.TestCase):
         incidents = aggregate_alerts(self.df, self.flagged, local_ip="192.0.2.20")
         # если «сервер» — 192.0.2.20, его потоки группируются по собеседнику SERVER
         self.assertIn(SERVER, set(incidents["peer"]))
+
+    def test_trusted_addresses_and_networks(self):
+        trusted = aggregate_alerts(self.df, self.flagged, trusted=["192.0.2.10", "192.0.2.40/30"])
+        self.assertEqual(set(trusted["peer"]), {"192.0.2.20"})  # .10 и .40 — доверенные
+        self.assertEqual(len(parse_trusted("192.0.2.10, 198.51.100.0/24;2001:db8::/32")), 3)
+        with self.assertRaises(ValueError):
+            parse_trusted("not-an-ip")
+        mask = trusted_mask(["192.0.2.10", "2001:db8::1", "garbage"], parse_trusted("2001:db8::/32"))
+        self.assertEqual(mask.tolist(), [False, True, False])
 
     def test_without_meta_or_flags(self):
         self.assertIsNone(aggregate_alerts(self.df.drop(columns=["Src IP"]), self.flagged))
