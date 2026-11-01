@@ -162,6 +162,13 @@ def _sign_payload(payload: dict, key_path: str) -> dict:
     }
 
 
+def write_json(path: str, payload: dict) -> None:
+    """JSON артефакта модели. LF и на Windows: git хранит JSON с LF, иначе
+    хэши в checksums.json не совпадут после клонирования."""
+    with open(path, "w", encoding="utf-8", newline="\n") as handle:
+        json.dump(payload, handle, ensure_ascii=False, indent=2)
+
+
 def write_checksums(
     model_dir: str,
     filenames: list[str] | None = None,

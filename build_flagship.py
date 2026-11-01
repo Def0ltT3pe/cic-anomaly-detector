@@ -27,7 +27,6 @@ from __future__ import annotations
 
 import argparse
 import glob
-import json
 import os
 import shutil
 import sys
@@ -38,23 +37,31 @@ import joblib
 import numpy as np
 import pandas as pd
 from sklearn.ensemble import IsolationForest, RandomForestClassifier
-from sklearn.pipeline import make_pipeline
-from sklearn.preprocessing import FunctionTransformer, StandardScaler
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 if BASE_DIR not in sys.path:
     sys.path.insert(0, BASE_DIR)
 
-from evaluate import Dataset, attack_family, evaluate_scores, load_dataset, resolve_datasets
+from evaluate import (
+    SUMMARY_KEYS,
+    Dataset,
+    attack_family,
+    evaluate_scores,
+    load_dataset,
+    resolve_datasets,
+    summarize_metrics,
+)
 from modules.bruteforce import load_bruteforce
 from modules.calibration import CALIBRATION_FILE, load_calibration
-from modules.integrity import write_checksums
+from modules.integrity import write_checksums, write_json
 from modules.model_loader import STATS_FILE, load_model_objects, load_normal_stats, resolve_model_dir
-from modules.pipeline import prepare_features, signed_log1p
+from modules.pipeline import if_scores, make_scaler, prepare_features
 
 TRAIN_NETWORKS = ("cic2017", "cic2018")
 EXTERNAL_NETWORK = "ddos2019"
 DISPLAY_NAME = "Атаки"
+# recall_oracle показывает, хватает ли ранжирования, если порог подобрать под сеть
+REPORT_KEYS = SUMMARY_KEYS + ("recall_oracle",)
 
 
 class FlagshipError(RuntimeError):
@@ -145,15 +152,24 @@ def load_cic(name: str, path: str, cols: list[str], args, rng) -> Network:
     return Network(name, data, train, calib, np.sort(order[cut:]))
 
 
-def load_site(spec: str, cols: list[str], args, rng) -> Network:
+def parse_site_spec(spec: str) -> tuple[str, str, int | None]:
+    """NAME=DIR[:N] -> (имя, каталог, N). Двоеточие диска Windows (D:/…) — не N."""
     name, sep, rest = spec.partition("=")
-    directory, _, count = rest.rpartition(":") if rest.rsplit(":", 1)[-1].isdigit() else (rest, "", "")
+    directory, count = rest, None
+    head, colon, tail = rest.rpartition(":")
+    if colon and tail.isdigit():
+        directory, count = head, int(tail)
     if not sep or not name or not directory:
         raise FlagshipError(f"--site ожидает NAME=DIR[:N], получено: {spec!r}")
+    return name, directory, count
+
+
+def load_site(spec: str, cols: list[str], args, rng) -> Network:
+    name, directory, count = parse_site_spec(spec)
     files = sorted(glob.glob(os.path.join(directory, "*.parquet")))
     if len(files) < 2:
         raise FlagshipError(f"{name}: в {directory} меньше двух .parquet")
-    n_test = int(count) if count else max(1, int(len(files) * 0.15))
+    n_test = count if count is not None else max(1, int(len(files) * 0.15))
     if not 0 < n_test < len(files):
         raise FlagshipError(f"{name}: на проверку {n_test} из {len(files)} файлов")
 
@@ -181,12 +197,6 @@ def load_site(spec: str, cols: list[str], args, rng) -> Network:
     return Network(name, data, train, calib, test)
 
 
-def _make_scaler():
-    return make_pipeline(
-        FunctionTransformer(signed_log1p, feature_names_out="one-to-one"), StandardScaler()
-    )
-
-
 class Flagship:
     """IF (log1p + StandardScaler) на норме всех сетей и RF «атака / норма»."""
 
@@ -204,7 +214,7 @@ class Flagship:
         self.benign_rows = len(benign_train)
 
         X_benign = self.features(benign_train)
-        self.scaler = _make_scaler().fit(X_benign)
+        self.scaler = make_scaler(log1p=True).fit(X_benign)
         self.iforest = IsolationForest(
             n_estimators=args.n_estimators, random_state=args.seed, n_jobs=args.n_jobs
         ).fit(self.scaler.transform(X_benign))
@@ -212,33 +222,36 @@ class Flagship:
         X_train = pd.concat([self.features(n.data.X.iloc[n.train]) for n in networks],
                             ignore_index=True)
         y_train = np.concatenate([n.data.y[n.train] for n in networks]).astype(int)
-        self.rf_params = {
+        params = {
             "n_estimators": args.rf_trees,
             "max_depth": args.rf_depth or None,
             "min_samples_leaf": args.rf_leaf,
             "max_samples": args.rf_max_samples,
             "class_weight": "balanced_subsample",
-            "seed": args.seed,
+            "random_state": args.seed,
         }
-        self.rf = RandomForestClassifier(
-            n_estimators=args.rf_trees, max_depth=args.rf_depth or None,
-            min_samples_leaf=args.rf_leaf, max_samples=args.rf_max_samples,
-            class_weight="balanced_subsample", random_state=args.seed, n_jobs=args.n_jobs,
-        ).fit(X_train, y_train)
+        self.rf = RandomForestClassifier(**params, n_jobs=args.n_jobs).fit(X_train, y_train)
+        # в bruteforce.json параметры хранятся с seed, как у train_bruteforce.py
+        seed = params.pop("random_state")
+        self.rf_params = {**params, "seed": seed}
         self.train_rows = len(X_train)
 
         # Пороги — по отложенной норме всех сетей, каждая сеть с равным весом
+        empty = [n.name for n in networks if not len(n.calib)]
+        if empty:
+            raise FlagshipError("Нет нормы для порога у сетей: " + ", ".join(empty))
         calib = [n.data.X.iloc[n.calib] for n in networks]
-        if_scores = [self.if_score(part) for part in calib]
-        rf_scores = [self.rf_proba(part) for part in calib]
-        weights = [np.full(len(s), 1.0 / len(s)) for s in if_scores]
-        self.calib_scores = np.concatenate(if_scores)
-        self.calib_weights = np.concatenate(weights)
+        calib_if = [self.if_score(part) for part in calib]
+        calib_rf = [self.rf_proba(part) for part in calib]
+        self.calib_scores = np.concatenate(calib_if)
+        self.calib_weights = np.concatenate([np.full(len(s), 1.0 / len(s)) for s in calib_if])
         self.threshold = _weighted_quantile(self.calib_scores, self.calib_weights, args.target_fpr)
-        self.rf_threshold = float(np.nextafter(
-            _weighted_quantile(np.concatenate(rf_scores), self.calib_weights, 1 - args.rf_target_fpr),
-            np.inf,
-        ))
+        rf_quantile = _weighted_quantile(
+            np.concatenate(calib_rf), self.calib_weights, 1 - args.rf_target_fpr
+        )
+        # Чуть выше квантиля (у RF много одинаковых вероятностей), но строго
+        # меньше 1: load_bruteforce принимает только 0 < threshold < 1
+        self.rf_threshold = float(min(np.nextafter(rf_quantile, np.inf), np.nextafter(1.0, 0.0)))
         self.calib_rows = len(self.calib_scores)
         return self
 
@@ -248,7 +261,7 @@ class Flagship:
 
     def if_score(self, X: pd.DataFrame) -> np.ndarray:
         """decision_function: меньше — аномальнее (как в pipeline)."""
-        return self.iforest.decision_function(self.scaler.transform(self.features(X)))
+        return if_scores(self.iforest, self.scaler, None, self.features(X))
 
     def rf_proba(self, X: pd.DataFrame) -> np.ndarray:
         return self.rf.predict_proba(self.features(X))[:, 1]
@@ -272,8 +285,7 @@ def _weighted_quantile(values: np.ndarray, weights: np.ndarray, q: float) -> flo
 
 
 def _summary(metrics: dict) -> dict:
-    keys = ("rows", "attacks", "auc", "fpr", "recall", "recall_oracle", "families")
-    return {key: metrics.get(key) for key in keys}
+    return summarize_metrics(metrics, REPORT_KEYS)
 
 
 def evaluate_model_dir(model_dir: str, data: Dataset, rows: np.ndarray, args) -> dict:
@@ -283,10 +295,7 @@ def evaluate_model_dir(model_dir: str, data: Dataset, rows: np.ndarray, args) ->
     calibration = load_calibration(model_dir)
     part = _subset(data, rows)
     X, _ = prepare_features(part.X, cols, fill_values=means)
-    scaled = scaler.transform(X)
-    if selector is not None:
-        scaled = selector.transform(scaled)
-    scores = model.decision_function(scaled)
+    scores = if_scores(model, scaler, selector, X)
     threshold = calibration.threshold if calibration is not None else 0.0
     result = {"isolation_forest": _summary(evaluate_scores(
         part, -scores, float(np.nextafter(-threshold, -np.inf)), args.target_fpr))}
@@ -298,13 +307,6 @@ def evaluate_model_dir(model_dir: str, data: Dataset, rows: np.ndarray, args) ->
             args.rf_target_fpr))
         result["supervised"]["display_name"] = brute.display_name
     return result
-
-
-def _write_json(path: str, payload: dict) -> None:
-    # LF и на Windows: git хранит JSON с LF, иначе хэши в checksums.json
-    # не совпадут после клонирования
-    with open(path, "w", encoding="utf-8", newline="\n") as handle:
-        json.dump(payload, handle, ensure_ascii=False, indent=2)
 
 
 def save(model: Flagship, output_dir: str, networks: list[Network], report: dict, args) -> dict:
@@ -319,7 +321,7 @@ def save(model: Flagship, output_dir: str, networks: list[Network], report: dict
     joblib.dump(model.scaler, os.path.join(output_dir, "scaler.pkl"))
     joblib.dump(list(cols), os.path.join(output_dir, "feature_cols_filtered.pkl"))
     stds = model.stds.where(np.isfinite(model.stds) & (model.stds > 0), 1.0)
-    _write_json(os.path.join(output_dir, STATS_FILE), {
+    write_json(os.path.join(output_dir, STATS_FILE), {
         "source": ", ".join(sources),
         "rows": int(model.benign_rows),
         "created_at": created_at,
@@ -327,7 +329,7 @@ def save(model: Flagship, output_dir: str, networks: list[Network], report: dict
         "means": {c: float(v) for c, v in model.means.reindex(cols).fillna(0).items()},
         "stds": {c: float(v) for c, v in stds.reindex(cols).fillna(1).items()},
     })
-    _write_json(os.path.join(output_dir, CALIBRATION_FILE), {
+    write_json(os.path.join(output_dir, CALIBRATION_FILE), {
         "threshold": model.threshold,
         "target_fpr": float(args.target_fpr),
         "rows": int(model.calib_rows),
@@ -339,7 +341,7 @@ def save(model: Flagship, output_dir: str, networks: list[Network], report: dict
         "created_at": created_at,
     })
     joblib.dump(model.rf, os.path.join(output_dir, "bruteforce.pkl"), compress=3)
-    _write_json(os.path.join(output_dir, "bruteforce.json"), {
+    write_json(os.path.join(output_dir, "bruteforce.json"), {
         "model": "RandomForestClassifier",
         "created_at": created_at,
         "display_name": DISPLAY_NAME,
@@ -369,7 +371,7 @@ def save(model: Flagship, output_dir: str, networks: list[Network], report: dict
         "rf_target_fpr": float(args.rf_target_fpr),
         **report,
     }
-    _write_json(os.path.join(output_dir, "metadata.json"), metadata)
+    write_json(os.path.join(output_dir, "metadata.json"), metadata)
     checksums = write_checksums(output_dir)
     return {"signed": "signature" in checksums, "metadata": metadata}
 

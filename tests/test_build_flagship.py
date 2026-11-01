@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import numpy as np
 import pandas as pd
 
-from build_flagship import FlagshipError, _cap, _weighted_quantile, load_site
+from build_flagship import FlagshipError, _cap, _weighted_quantile, load_site, parse_site_spec
 from tests.helpers import make_temp_dir, remove_temp_dir
 
 
@@ -49,6 +49,11 @@ class LoadSiteTests(unittest.TestCase):
         self.assertFalse(set(network.data.files.iloc[network.train]) & {"capture_00003_labeled.parquet"})
         self.assertFalse(network.data.y[network.calib].any())
         self.assertTrue(network.data.X["b"].isna().all())  # inf -> NaN, заполнит pipeline
+
+    def test_parse_site_spec(self):
+        self.assertEqual(parse_site_spec("a=D:/flows/a:3"), ("a", "D:/flows/a", 3))
+        self.assertEqual(parse_site_spec("a=D:/flows/a"), ("a", "D:/flows/a", None))
+        self.assertEqual(parse_site_spec("a=flows/a"), ("a", "flows/a", None))
 
     def test_bad_spec(self):
         with self.assertRaises(FlagshipError):
