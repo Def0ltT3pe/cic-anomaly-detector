@@ -615,12 +615,17 @@ IsolationForest) или по номеру строки. Для потока ср
 в приложении. Роль viewer видит факты без вопросов к ИИ.
 
 Провайдеры (выбор — в боковой панели, по умолчанию `LLM_PROVIDER`):
-- **Gemini** — `GEMINI_API_KEY`, SDK `google-genai` из `requirements.txt`
-  (запасной — legacy `google-generativeai`);
-- **OpenAI-совместимый** — `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `OPENAI_MODEL`;
-  отдельный SDK не нужен. Так же подключаются OpenRouter, DeepSeek и
+- **Gemini** — `GEMINI_API_KEY`, `GEMINI_MODEL`;
+- **OpenAI-совместимый** — `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `OPENAI_MODEL`.
+  Так же подключаются OpenRouter, DeepSeek и
   локальные Ollama (`OPENAI_BASE_URL=http://localhost:11434/v1`, ключ не
   нужен) или LM Studio.
+
+Оба провайдера вызываются напрямую по HTTP (потоковый ответ, SSE), без SDK:
+потоковый режим `google-genai` зависал без ответа, хотя тот же запрос по
+HTTP приходил за секунды. Таймаут ожидания — 120 с на каждое чтение
+(«думающие» модели молчат до первого куска); повторы — только при сбоях
+сети, 408/409/429 и 5xx.
 
 Ключи берутся из переменных окружения или `.streamlit/secrets.toml`; в
 исходниках ключей нет. Ключ можно ввести и в боковой панели («Ключ API для
@@ -662,8 +667,8 @@ IsolationForest) или по номеру строки. Для потока ср
   (recall 0.999, precision ≈ 0.96, FPR ≈ 0.10%).
 - Подмена `scaler.pkl` обнаружена проверкой SHA-256; `bruteforce.pkl` и
   `bruteforce.json` также входят в `checksums.json`.
-- Новый путь `google-genai` проверен на mock-модуле (single и stream);
-  fallback `google-generativeai` выбран локально.
+- Gemini и OpenAI-совместимый API проверены на локальных поддельных
+  серверах (стриминг, история, ключ в заголовке); Gemini — и на настоящем API.
 
 ## Тесты
 

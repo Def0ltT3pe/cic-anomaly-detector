@@ -158,25 +158,47 @@ class OpenAiStreamTests(unittest.TestCase):
         self.assertEqual(len(FakeChat.requests), 1)
 
 
-class GeminiClientCacheTests(unittest.TestCase):
-    def test_interface_key_is_not_cached(self):
-        created = []
+class FakeGemini(BaseHTTPRequestHandler):
+    """streamGenerateContent?alt=sse: рассуждение (thought) и два куска ответа."""
 
-        class FakeModels:
-            def generate_content_stream(self, **kwargs):
-                return [type("Chunk", (), {"text": "ок"})()]
+    requests: list = []
 
-        class FakeClient:
-            def __init__(self, api_key, http_options=None):
-                created.append((api_key, http_options))
-                self.models = FakeModels()
+    def do_POST(self):
+        body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        headers = {name.lower(): value for name, value in self.headers.items()}
+        FakeGemini.requests.append((self.path, headers, body))
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.end_headers()
+        for part in ({"text": "думаю…", "thought": True}, {"text": "При"}, {"text": "вет"}):
+            event = {"candidates": [{"content": {"role": "model", "parts": [part]}}]}
+            self.wfile.write(("data: " + json.dumps(event) + "\r\n\r\n").encode())
 
-        with patch.dict(os.environ, {**CLEAN, "GEMINI_API_KEY": "env-key"}), \
-                patch.object(llm_explain, "_backend", return_value="genai"), \
-                patch("google.genai.Client", FakeClient), \
-                patch.dict(llm_explain._clients, clear=True):
-            "".join(stream_chat("gemini", [{"role": "user", "content": "x"}], api_key="ui-key"))
-            self.assertNotIn("ui-key", llm_explain._clients)
-            "".join(stream_chat("gemini", [{"role": "user", "content": "x"}]))
-            self.assertIn("env-key", llm_explain._clients)
-        self.assertEqual(created[0], ("ui-key", {"timeout": 60_000}))
+    def log_message(self, *args):
+        pass
+
+
+class GeminiStreamTests(unittest.TestCase):
+    def setUp(self):
+        self.server = HTTPServer(("127.0.0.1", 0), FakeGemini)
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.addCleanup(self.server.server_close)
+        self.addCleanup(self.server.shutdown)
+        FakeGemini.requests = []
+        url = patch.object(llm_explain, "GEMINI_URL", f"http://127.0.0.1:{self.server.server_port}/v1beta")
+        url.start()
+        self.addCleanup(url.stop)
+
+    def test_stream_payload_and_key_header(self):
+        messages = [{"role": "user", "content": "вопрос"}, {"role": "assistant", "content": "ответ"},
+                    {"role": "user", "content": "ещё"}]
+        env = {**CLEAN, "GEMINI_API_KEY": "env-key", "GEMINI_MODEL": "gemini-test"}
+        with patch.dict(os.environ, env):
+            text = "".join(stream_chat("gemini", messages, system="роль", api_key="ui-key"))
+        self.assertEqual(text, "Привет")  # рассуждение модели не показывается
+        path, headers, body = FakeGemini.requests[0]
+        self.assertEqual(path, "/v1beta/models/gemini-test:streamGenerateContent?alt=sse")
+        self.assertEqual(headers["x-goog-api-key"], "ui-key")
+        self.assertNotIn("key=", path)
+        self.assertEqual([c["role"] for c in body["contents"]], ["user", "model", "user"])
+        self.assertEqual(body["systemInstruction"], {"parts": [{"text": "роль"}]})
