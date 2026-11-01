@@ -34,6 +34,20 @@ class LlmUnavailableError(RuntimeError):
     """LLM использовать нельзя: нет ключа, пакета или ответа модели."""
 
 
+class LlmRequestError(RuntimeError):
+    """Ошибка запроса к провайдеру; status — HTTP-код, если он известен."""
+
+    def __init__(self, message: str, status: int | None = None):
+        super().__init__(message)
+        self.status = status
+
+
+# Повторять имеет смысл только временные ошибки: сеть, 408/409/429, 5xx.
+# Неверный ключ или модель (400/401/403/404) повтор не исправит, а у платных
+# API лишние запросы ещё и тарифицируются.
+RETRY_STATUSES = {408, 409, 429}
+
+
 def _setting(name: str) -> str:
     """Значение из env, иначе из .streamlit/secrets.toml (NAME, name, [section] key)."""
     value = (os.environ.get(name) or "").strip()
@@ -58,10 +72,6 @@ def _secret(name: str) -> str:
     return ""
 
 
-def _read_api_key() -> str:
-    return _setting("GEMINI_API_KEY")
-
-
 def configured_providers(keys: dict | None = None) -> list[str]:
     """Провайдеры, для которых задан ключ или адрес (без проверки сети).
 
@@ -69,7 +79,7 @@ def configured_providers(keys: dict | None = None) -> list[str]:
     """
     keys = keys or {}
     providers = []
-    if keys.get("gemini") or _read_api_key():
+    if keys.get("gemini") or _setting("GEMINI_API_KEY"):
         providers.append("gemini")
     if keys.get("openai") or _setting("OPENAI_API_KEY") or _setting("OPENAI_BASE_URL"):
         providers.append("openai")
@@ -133,7 +143,10 @@ def _build_prompt(stats_text: str) -> str:
 
 
 def _gemini_stream(system: str | None, messages: list[dict], model_name: str, api_key=None):
-    api_key = api_key or _read_api_key()
+    # Клиент кэшируется только для ключа из env/secrets: ключ из интерфейса
+    # не должен оставаться в памяти процесса после выхода из сессии
+    cache = api_key is None
+    api_key = api_key or _setting("GEMINI_API_KEY")
     if not api_key:
         raise LlmUnavailableError(
             "Не задан GEMINI_API_KEY. Добавьте его в переменные окружения "
@@ -147,10 +160,13 @@ def _gemini_stream(system: str | None, messages: list[dict], model_name: str, ap
     if _backend() == "genai":
         from google import genai
 
-        client = _clients.get(api_key)
+        client = _clients.get(api_key) if cache else None
         if client is None:
-            client = genai.Client(api_key=api_key)
-            _clients[api_key] = client
+            client = genai.Client(
+                api_key=api_key, http_options={"timeout": REQUEST_TIMEOUT_SECONDS * 1000}
+            )
+            if cache:
+                _clients[api_key] = client
         config = {"system_instruction": system} if system else None
         response = client.models.generate_content_stream(
             model=model_name, contents=contents, config=config
@@ -195,7 +211,7 @@ def _openai_stream(system: str | None, messages: list[dict], model_name: str, ap
         response = urllib.request.urlopen(request, timeout=REQUEST_TIMEOUT_SECONDS)
     except urllib.error.HTTPError as exc:
         body = exc.read().decode("utf-8", "replace")[:500]
-        raise RuntimeError(f"HTTP {exc.code}: {body}") from exc
+        raise LlmRequestError(f"HTTP {exc.code}: {body}", status=exc.code) from exc
 
     with response:
         for raw in response:
@@ -210,7 +226,7 @@ def _openai_stream(system: str | None, messages: list[dict], model_name: str, ap
             except ValueError:
                 continue
             if event.get("error"):
-                raise RuntimeError(str(event["error"])[:500])
+                raise LlmRequestError(str(event["error"])[:500])
             for choice in event.get("choices") or []:
                 text = (choice.get("delta") or {}).get("content")
                 if text:
@@ -242,29 +258,42 @@ def stream_chat(
             for text in generate(system, messages, model_name, api_key):
                 started = True
                 yield text
-            return
         except LlmUnavailableError:
             raise
-        except Exception as exc:  # сеть, квоты, неверный ключ и т.п.
+        except Exception as exc:  # сеть, квоты, неверный ключ, ошибки SDK
             if started:
                 raise LlmUnavailableError(f"{PROVIDERS[provider]}: ответ оборвался: {exc}") from exc
             last_error = exc
+            if not _retryable(exc):
+                break
             if attempt < ATTEMPTS:
                 time.sleep(2 ** (attempt - 1))
+            continue
+        if not started:
+            # Пустой ответ (например, заблокирован фильтром) сохранять в чат
+            # нельзя: следующий запрос с пустой репликой провайдер отвергнет
+            raise LlmUnavailableError(
+                f"{PROVIDERS[provider]}: модель не вернула текст (возможно, ответ заблокирован фильтром)."
+            )
+        return
 
-    raise LlmUnavailableError(
-        f"{PROVIDERS[provider]} недоступен после {ATTEMPTS} попыток: {last_error}"
-    ) from last_error
+    raise LlmUnavailableError(f"{PROVIDERS[provider]} недоступен: {last_error}") from last_error
 
 
-def enhance_report_with_gemini(
-    stats_text: str, model_name: str | None = None, provider: str | None = None
-) -> str:
+def _retryable(exc: Exception) -> bool:
+    status = getattr(exc, "status", None)
+    if not isinstance(status, int):
+        status = getattr(exc, "code", None)  # google-genai APIError
+    if not isinstance(status, int) or not 400 <= status < 500:
+        return True
+    return status in RETRY_STATUSES
+
+
+def explain_with_llm(stats_text: str, provider: str | None = None) -> str:
     """Краткое пояснение одной строкой (для CLI); провайдер — по умолчанию."""
     provider = provider or default_provider()
     if provider is None:
         raise LlmUnavailableError("Не настроен ни один провайдер LLM.")
-    text = "".join(stream_chat(provider, [{"role": "user", "content": _build_prompt(stats_text)}]))
-    if not text.strip():
-        raise LlmUnavailableError("Модель не вернула текст.")
-    return text.strip()
+    return "".join(
+        stream_chat(provider, [{"role": "user", "content": _build_prompt(stats_text)}])
+    ).strip()

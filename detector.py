@@ -147,10 +147,10 @@ def main() -> int:
     explainer = None
     if args.use_llm:
         try:
-            from modules.llm_explain import enhance_report_with_gemini, is_llm_configured
+            from modules.llm_explain import explain_with_llm, is_llm_configured
 
             if is_llm_configured():
-                explainer = enhance_report_with_gemini
+                explainer = explain_with_llm
             else:
                 print("ВНИМАНИЕ: LLM не настроен (GEMINI_API_KEY или OPENAI_API_KEY / OPENAI_BASE_URL) — отчёт будет без пояснений ИИ.")
         except Exception as exc:

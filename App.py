@@ -9,6 +9,7 @@ import shutil
 import sys
 import tempfile
 import time
+from typing import NamedTuple
 
 import numpy as np
 import pandas as pd
@@ -40,8 +41,9 @@ from modules.flow_report import (
     DEFAULT_QUESTION,
     SYSTEM_PROMPT,
     build_flow_report,
-    first_message,
+    first_prompt,
     flagged_candidates,
+    without_images,
 )
 from modules.llm_explain import (
     PROVIDERS,
@@ -75,8 +77,20 @@ st.set_page_config(
 )
 
 
+class Assets(NamedTuple):
+    model: object
+    scaler: object
+    selector: object
+    feature_cols: list
+    means: pd.Series
+    stds: pd.Series
+    calibration: object
+    brute: object
+    errors: list
+
+
 @st.cache_resource(show_spinner="Загружаем модель…", max_entries=4)
-def _load_assets(model_dir: str):
+def _load_assets(model_dir: str) -> Assets:
     model, scaler, selector, feature_cols = load_model_objects(model_dir)
     means, stds = load_normal_stats(feature_cols=feature_cols, model_dir=model_dir)
     errors = []
@@ -104,7 +118,7 @@ def _load_assets(model_dir: str):
             + " — переподпишите модели: python make_checksums.py"
         )
 
-    return model, scaler, selector, feature_cols, means, stds, calibration, brute, errors
+    return Assets(model, scaler, selector, feature_cols, means, stds, calibration, brute, errors)
 
 
 MAX_LOGIN_ATTEMPTS = 5
@@ -231,7 +245,7 @@ def _render_audit_panel() -> None:
             )
             if details:
                 line += " · " + " ".join(f"{key}={value}" for key, value in details.items())
-            st.caption(line)
+            st.text(line)
 
 
 def _render_identity() -> None:
@@ -348,34 +362,31 @@ def _flow_title(result: DetectionResult, index: int, brute, brute_probs) -> str:
     return " · ".join(parts)
 
 
-def _ask_llm(provider: str, chat: list[dict], question: str, report_for_llm: str, index: int) -> bool:
+def _ask_llm(
+    user, role, provider: str, api_key, chat: list[dict], question: str, report_for_llm: str,
+    index: int,
+) -> bool:
     """Вопрос в чат по потоку; ответ показывается по мере генерации. True — ответ сохранён."""
-    user = st.session_state.get("user")
-    role = st.session_state.get("role")
-    content = first_message(report_for_llm, question)["content"] if not chat else question
+    content = first_prompt(report_for_llm, question) if not chat else question
     messages = [{"role": m["role"], "content": m["content"]} for m in chat]
     messages.append({"role": "user", "content": content})
     with st.chat_message("user"):
         st.markdown(question)
     with st.chat_message("assistant"):
         try:
-            api_key = st.session_state.llm_keys.get(provider)
-            answer = st.write_stream(
+            answer = st.write_stream(without_images(
                 stream_chat(provider, messages, system=SYSTEM_PROMPT, api_key=api_key)
-            )
-        except LlmUnavailableError as exc:
-            st.warning(str(exc))
-            log_event(user, role, "llm_ask", row=index, provider=provider, ok=False, error=str(exc))
-            return False
-        except Exception as exc:  # неожиданная ошибка SDK
-            logger.exception("LLM error")
-            st.warning(f"Ошибка LLM: {exc}")
+            ))
+        except Exception as exc:
+            if not isinstance(exc, LlmUnavailableError):  # неожиданная ошибка SDK
+                logger.exception("LLM error")
+            st.warning(str(exc) if isinstance(exc, LlmUnavailableError) else f"Ошибка LLM: {exc}")
             log_event(user, role, "llm_ask", row=index, provider=provider, ok=False, error=str(exc))
             return False
     answer = answer if isinstance(answer, str) else "".join(map(str, answer))
     chat.append({"role": "user", "content": content, "shown": question})
     chat.append({"role": "assistant", "content": answer, "shown": answer, "provider": provider})
-    log_event(user, role, "llm_ask", row=index, provider=provider, ok=bool(answer.strip()), error=None)
+    log_event(user, role, "llm_ask", row=index, provider=provider, ok=True, error=None)
     return True
 
 
@@ -422,7 +433,9 @@ def _render_flow_review(
         with st.chat_message(message["role"]):
             st.markdown(message["shown"])
 
-    if not can_use_llm(st.session_state.get("role")):
+    user = st.session_state.get("user")
+    role = st.session_state.get("role")
+    if not can_use_llm(role):
         st.caption("Роль viewer: вопросы к ИИ отключены, доступны только факты моделей.")
     elif provider is None:
         st.caption(
@@ -444,7 +457,8 @@ def _render_flow_review(
         question = question.strip() or ("" if chat else DEFAULT_QUESTION)
         if asked and question:
             masked = build_flow_report(result, index, means, stds, mask_ips=True, **report_kwargs)
-            if _ask_llm(provider, chat, question, masked, index):
+            api_key = st.session_state.llm_keys.get(provider)
+            if _ask_llm(user, role, provider, api_key, chat, question, masked, index):
                 st.rerun()  # история над формой, как при следующих вопросах
 
     document = [f"# Разбор потока #{index}", "", report]
@@ -711,37 +725,15 @@ def _render_model_card(entry: ModelEntry) -> None:
             st.dataframe(pd.DataFrame(rows), hide_index=True)
 
 
-def main() -> None:
-    _init_state()
-    _login_screen()
-    _render_identity()
-
-    user = st.session_state.get("user")
-    role = st.session_state.get("role")
-
-    entry = _select_model(user, role)
-    model_dir = entry.path if entry is not None else resolve_model_dir()
-    try:
-        model, scaler, selector, feature_cols, means, stds, calibration, brute, load_errors = (
-            _load_assets(model_dir)
-        )
-    except ModelLoadError as exc:
-        log_event(user, role, "model_error", message=str(exc))
-        st.sidebar.error(f"❌ {exc}")
-        st.stop()
-    except Exception as exc:
-        logger.exception("Не удалось загрузить модель")
-        log_event(user, role, "model_error", message=str(exc))
-        st.sidebar.error(f"❌ Не удалось загрузить модель: {exc}")
-        st.stop()
-
+def _render_model_status(entry: ModelEntry | None, assets: Assets, user, role) -> None:
     st.sidebar.success("✅ Модель и статистики загружены")
     if entry is not None:
         _render_model_card(entry)
-    for message in load_errors:
+    for message in assets.errors:
         st.sidebar.warning(f"⚠️ {message}")
         log_event(user, role, "model_warning", message=message)
-    st.sidebar.caption(f"Признаков: {len(feature_cols)}")
+    st.sidebar.caption(f"Признаков: {len(assets.feature_cols)}")
+    calibration = assets.calibration
     if calibration is not None:
         st.sidebar.caption(
             f"Порог: score ≤ {calibration.threshold:.4f} "
@@ -751,17 +743,14 @@ def main() -> None:
         st.sidebar.caption("Порог: встроенный (contamination модели)")
     if calibration is not None and calibration.source == "target network holdout":
         st.sidebar.caption("Модель адаптирована под целевую сеть (adapt_model.py)")
+    brute = assets.brute
     st.sidebar.caption(
         (f"{brute.display_name}: supervised" if brute is not None else "Supervised: нет модели")
     )
-    provider = _select_llm_provider(user, role)
 
-    st.title("Анализатор аномалий сетевого трафика")
-    st.caption(
-        "Загрузите захват pcap/pcapng (потоки посчитает tshark) или CSV/Parquet "
-        "с теми же признаками, что использовались при обучении."
-    )
 
+def _handle_upload(user, role) -> tuple[pd.DataFrame, str] | None:
+    """Загрузка файлов: таблица и имена файлов, или None, если анализировать нечего."""
     uploaded = st.file_uploader(
         "📂 Загрузите файлы (pcap, pcapng, Parquet или CSV)",
         type=list(PCAP_EXTENSIONS + TABLE_EXTENSIONS),
@@ -769,7 +758,7 @@ def main() -> None:
     )
     if not uploaded:
         st.info("Файл не загружен.")
-        return
+        return None
 
     file_id = tuple(
         getattr(item, "file_id", None) or f"{item.name}:{item.size}" for item in uploaded
@@ -785,11 +774,11 @@ def main() -> None:
         except ConversionError as exc:
             log_event(user, role, "upload_error", file=names, error=str(exc))
             st.error(f"Не удалось разобрать захват: {exc} (путь к tshark можно задать в TSHARK)")
-            return
+            return None
         except Exception as exc:
             log_event(user, role, "upload_error", file=names, error=str(exc))
             st.error(f"Не удалось прочитать файл: {exc}")
-            return
+            return None
 
         st.session_state.file_id = file_id
         st.session_state.df = df
@@ -807,7 +796,79 @@ def main() -> None:
 
     df = st.session_state.df
     if df is None:
+        return None
+    return df, names
+
+
+def _run_analysis(df: pd.DataFrame, assets: Assets, user, role) -> None:
+    try:
+        with st.spinner("Ищем аномалии…"):
+            result = detect_anomalies(
+                df,
+                assets.model,
+                assets.scaler,
+                assets.selector,
+                assets.feature_cols,
+                fill_values=assets.means,
+                max_rows=MAX_ROWS,
+                calibration=assets.calibration,
+            )
+    except FeatureValidationError as exc:
+        st.error(str(exc))
         return
+    except Exception as exc:
+        logger.exception("Ошибка детекции")
+        st.error(f"Ошибка при анализе: {exc}")
+        return
+    st.session_state.analysis = result
+    st.session_state.explanations = {}
+    brute_payload = _compute_brute(result, assets.brute)
+    st.session_state.brute = brute_payload
+    log_event(
+        user,
+        role,
+        "analyze",
+        rows=result.total,
+        anomalies=result.n_anomalies,
+        brute=int(brute_payload[1].sum()) if brute_payload is not None else None,
+        threshold=result.threshold,
+    )
+
+
+def main() -> None:
+    _init_state()
+    _login_screen()
+    _render_identity()
+
+    user = st.session_state.get("user")
+    role = st.session_state.get("role")
+
+    entry = _select_model(user, role)
+    model_dir = entry.path if entry is not None else resolve_model_dir()
+    try:
+        assets = _load_assets(model_dir)
+    except ModelLoadError as exc:
+        log_event(user, role, "model_error", message=str(exc))
+        st.sidebar.error(f"❌ {exc}")
+        st.stop()
+    except Exception as exc:
+        logger.exception("Не удалось загрузить модель")
+        log_event(user, role, "model_error", message=str(exc))
+        st.sidebar.error(f"❌ Не удалось загрузить модель: {exc}")
+        st.stop()
+
+    _render_model_status(entry, assets, user, role)
+    provider = _select_llm_provider(user, role)
+
+    st.title("Анализатор аномалий сетевого трафика")
+    st.caption(
+        "Загрузите захват pcap/pcapng (потоки посчитает tshark) или CSV/Parquet "
+        "с теми же признаками, что использовались при обучении."
+    )
+    upload = _handle_upload(user, role)
+    if upload is None:
+        return
+    df, names = upload
 
     st.caption(f"Файлы: `{names}` — {len(df):,} записей, {len(df.columns)} колонок")
     if st.session_state.flows_parquet is not None:
@@ -820,46 +881,13 @@ def main() -> None:
         )
 
     if st.button("Анализировать", type="primary"):
-        try:
-            with st.spinner("Ищем аномалии…"):
-                result = detect_anomalies(
-                    df,
-                    model,
-                    scaler,
-                    selector,
-                    feature_cols,
-                    fill_values=means,
-                    max_rows=MAX_ROWS,
-                    calibration=calibration,
-                )
-        except FeatureValidationError as exc:
-            st.error(str(exc))
-        except Exception as exc:
-            logger.exception("Ошибка детекции")
-            st.error(f"Ошибка при анализе: {exc}")
-        else:
-            st.session_state.analysis = result
-            st.session_state.explanations = {}
-            brute_payload = _compute_brute(result, brute)
-            st.session_state.brute = brute_payload
-            log_event(
-                user,
-                role,
-                "analyze",
-                rows=result.total,
-                anomalies=result.n_anomalies,
-                brute=(
-                    int(brute_payload[1].sum())
-                    if brute_payload is not None
-                    else None
-                ),
-                threshold=result.threshold,
-            )
+        _run_analysis(df, assets, user, role)
 
     result = st.session_state.analysis
     if result is not None:
         _render_analysis(
-            result, means, stds, brute, st.session_state.get("brute"), provider
+            result, assets.means, assets.stds, assets.brute, st.session_state.get("brute"),
+            provider,
         )
 
 

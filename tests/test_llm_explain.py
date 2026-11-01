@@ -21,14 +21,21 @@ class FakeChat(BaseHTTPRequestHandler):
     """Chat Completions со стримингом: два куска и [DONE]."""
 
     requests: list = []
+    status = 200
+    chunks = ("При", "вет")
 
     def do_POST(self):
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
         FakeChat.requests.append((self.path, dict(self.headers), body))
+        if FakeChat.status != 200:
+            self.send_response(FakeChat.status)
+            self.end_headers()
+            self.wfile.write(b'{"error": "bad key"}')
+            return
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.end_headers()
-        for text in ("При", "вет"):
+        for text in FakeChat.chunks:
             event = {"choices": [{"delta": {"content": text}}]}
             self.wfile.write(("data: " + json.dumps(event) + "\n\n").encode())
         self.wfile.write(b"data: [DONE]\n\n")
@@ -73,6 +80,8 @@ class OpenAiStreamTests(unittest.TestCase):
         self.addCleanup(self.server.server_close)
         self.addCleanup(self.server.shutdown)
         FakeChat.requests = []
+        FakeChat.status = 200
+        FakeChat.chunks = ("При", "вет")
         self.env = {**CLEAN, "OPENAI_BASE_URL": f"http://127.0.0.1:{self.server.server_port}/v1/",
                     "OPENAI_API_KEY": "test-key", "OPENAI_MODEL": "local-model"}
 
@@ -124,3 +133,50 @@ class OpenAiStreamTests(unittest.TestCase):
                 patch.object(llm_explain.time, "sleep"):
             text = "".join(stream_chat("openai", [{"role": "user", "content": "x"}]))
         self.assertEqual((text, len(attempts)), ("ок", 2))
+
+    def test_client_errors_are_not_retried(self):
+        FakeChat.status = 401
+        with patch.dict(os.environ, self.env), patch.object(llm_explain.time, "sleep"), \
+                self.assertRaises(LlmUnavailableError) as raised:
+            list(stream_chat("openai", [{"role": "user", "content": "x"}]))
+        self.assertEqual(len(FakeChat.requests), 1)
+        self.assertIn("HTTP 401", str(raised.exception))
+
+    def test_server_errors_are_retried(self):
+        FakeChat.status = 503
+        with patch.dict(os.environ, self.env), patch.object(llm_explain.time, "sleep"), \
+                self.assertRaises(LlmUnavailableError):
+            list(stream_chat("openai", [{"role": "user", "content": "x"}]))
+        self.assertEqual(len(FakeChat.requests), llm_explain.ATTEMPTS)
+
+    def test_empty_answer_is_an_error(self):
+        FakeChat.chunks = ()
+        with patch.dict(os.environ, self.env), \
+                self.assertRaises(LlmUnavailableError) as raised:
+            list(stream_chat("openai", [{"role": "user", "content": "x"}]))
+        self.assertIn("не вернула текст", str(raised.exception))
+        self.assertEqual(len(FakeChat.requests), 1)
+
+
+class GeminiClientCacheTests(unittest.TestCase):
+    def test_interface_key_is_not_cached(self):
+        created = []
+
+        class FakeModels:
+            def generate_content_stream(self, **kwargs):
+                return [type("Chunk", (), {"text": "ок"})()]
+
+        class FakeClient:
+            def __init__(self, api_key, http_options=None):
+                created.append((api_key, http_options))
+                self.models = FakeModels()
+
+        with patch.dict(os.environ, {**CLEAN, "GEMINI_API_KEY": "env-key"}), \
+                patch.object(llm_explain, "_backend", return_value="genai"), \
+                patch("google.genai.Client", FakeClient), \
+                patch.dict(llm_explain._clients, clear=True):
+            "".join(stream_chat("gemini", [{"role": "user", "content": "x"}], api_key="ui-key"))
+            self.assertNotIn("ui-key", llm_explain._clients)
+            "".join(stream_chat("gemini", [{"role": "user", "content": "x"}]))
+            self.assertIn("env-key", llm_explain._clients)
+        self.assertEqual(created[0], ("ui-key", {"timeout": 60_000}))
