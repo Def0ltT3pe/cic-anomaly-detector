@@ -80,6 +80,20 @@ find . -type f \( $names \) -printf '%P\t%s\t%T@\n'
     return Invoke-Remote $Server.target $script
 }
 
+function Test-ListedPath([string]$Path, [string]$LocalRoot) {
+    <# Путь из списка сервера: только «папка/файл» из безопасных символов, без
+       «..», имя по $Patterns, и после сборки он остаётся внутри $LocalRoot.
+       Иначе взломанный сервер мог бы записать файл куда угодно на этом диске
+       (например, подменить сам скрипт, который планировщик запускает сам). #>
+    if ($Path -notmatch '^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*$') { return $false }
+    if (@($Path.Split('/') | Where-Object { $_ -eq '.' -or $_ -eq '..' }).Count) { return $false }
+    $leaf = $Path.Split('/')[-1]
+    if (-not @($Patterns | Where-Object { $leaf -like $_ }).Count) { return $false }
+    $root = [IO.Path]::GetFullPath($LocalRoot).TrimEnd('\') + '\'
+    $full = [IO.Path]::GetFullPath((Join-Path $LocalRoot ($Path -replace '/', '\')))
+    return $full.StartsWith($root, [StringComparison]::OrdinalIgnoreCase)
+}
+
 function Get-PullPlan([string[]]$Listing, [string]$LocalRoot) {
     <# Строки «NOW\t<epoch>» и «<путь>\t<размер>\t<mtime>» -> что качать. #>
     $now = $null
@@ -88,6 +102,10 @@ function Get-PullPlan([string[]]$Listing, [string]$LocalRoot) {
         $parts = "$line".Split("`t")
         if ($parts[0] -eq 'NOW') { $now = [double]$parts[1]; continue }
         if ($parts.Count -ne 3) { continue }
+        if (-not (Test-ListedPath $parts[0] $LocalRoot)) {
+            Write-Log "  ПРОПУСК подозрительного пути от сервера: $($parts[0])"
+            continue
+        }
         $files += [pscustomobject]@{
             Path  = $parts[0]
             Size  = [int64]$parts[1]
