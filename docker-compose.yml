@@ -10,6 +10,11 @@ services:
     environment:
       # Пустое значение = пояснения ИИ отключены, детекция работает.
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      # OpenAI-совместимый API; для Ollama на хосте — http://host.docker.internal:11434/v1
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}
+      OPENAI_MODEL: ${OPENAI_MODEL:-}
+      LLM_PROVIDER: ${LLM_PROVIDER:-}
       APP_PASSWORD: ${APP_PASSWORD:-}
       # models — рабочая модель, models_v2 — экспериментальная.
       MODEL_DIR: ${MODEL_DIR:-models}

@@ -43,7 +43,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--input", required=True, help="CSV или Parquet с признаками")
     parser.add_argument("--output", default="anomaly_report.txt", help="Путь к отчёту")
     parser.add_argument("--model-dir", default=None, help="Каталог с .pkl (по умолчанию models/)")
-    parser.add_argument("--use_llm", action="store_true", help="Добавить пояснения Gemini")
+    parser.add_argument("--use_llm", action="store_true", help="Добавить пояснения LLM (провайдер — LLM_PROVIDER)")
     parser.add_argument(
         "--max_anomalies",
         type=int,
@@ -152,7 +152,7 @@ def main() -> int:
             if is_llm_configured():
                 explainer = enhance_report_with_gemini
             else:
-                print("ВНИМАНИЕ: GEMINI_API_KEY не задан — отчёт будет без пояснений ИИ.")
+                print("ВНИМАНИЕ: LLM не настроен (GEMINI_API_KEY или OPENAI_API_KEY / OPENAI_BASE_URL) — отчёт будет без пояснений ИИ.")
         except Exception as exc:
             print(f"ВНИМАНИЕ: LLM недоступен ({exc}) — отчёт будет без пояснений ИИ.")
 

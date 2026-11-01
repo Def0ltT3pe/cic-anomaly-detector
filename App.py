@@ -35,12 +35,21 @@ from modules.auth import (
 )
 from modules.bruteforce import BruteForceError, load_bruteforce
 from modules.calibration import CALIBRATION_FILE, CalibrationError, load_calibration
-from modules.explainer import explain_anomaly
 from modules.integrity import IntegrityError, verify_if_listed
+from modules.flow_report import (
+    DEFAULT_QUESTION,
+    SYSTEM_PROMPT,
+    build_flow_report,
+    first_message,
+    flagged_candidates,
+)
 from modules.llm_explain import (
+    PROVIDERS,
     LlmUnavailableError,
-    is_llm_configured,
-    stream_gemini_explanation,
+    configured_providers,
+    default_provider,
+    provider_label,
+    stream_chat,
 )
 from modules.model_catalog import ModelEntry, list_models
 from modules.model_loader import (
@@ -58,7 +67,6 @@ logger = logging.getLogger(__name__)
 MAX_ROWS = 2_000_000
 PCAP_EXTENSIONS = (".pcap", ".pcapng", ".cap")
 TABLE_EXTENSIONS = (".parquet", ".csv")
-MAX_EXPLANATIONS = 5
 
 st.set_page_config(
     page_title="Детектор аномалий трафика",
@@ -192,6 +200,8 @@ def _init_state() -> None:
         "brute": None,
         "flows_parquet": None,
         "model_dir": None,
+        "llm_provider": None,
+        "llm_keys": {},
         "user": None,
         "role": None,
         "auth_mode": None,
@@ -249,6 +259,7 @@ def _render_identity() -> None:
             "file_id",
             "explanations",
             "brute",
+            "llm_keys",
             "login_attempts",
             "lock_until",
         ):
@@ -325,99 +336,134 @@ def _load_uploads(files) -> tuple[pd.DataFrame, bool]:
     return df, tshark is not None
 
 
-def _true_label(result: DetectionResult, index: int) -> str:
-    if "Label" not in result.df.columns:
-        return "неизвестно"
-    return str(result.df.iloc[index]["Label"])
+def _flow_title(result: DetectionResult, index: int, brute, brute_probs) -> str:
+    row = result.df.iloc[index]
+    parts = [f"#{index}"]
+    if all(column in row.index for column in ("Src IP", "Dst IP", "Dst Port")):
+        parts.append(f"{row['Src IP']} → {row['Dst IP']}:{row['Dst Port']}")
+    if brute is not None and brute_probs is not None and brute_probs[index] >= brute.threshold:
+        parts.append(f"{brute.display_name} p={brute_probs[index]:.2f}")
+    if result.mask[index]:
+        parts.append(f"IF {result.scores[index]:.3f}")
+    return " · ".join(parts)
 
 
-def _render_explanations(result: DetectionResult, means, stds) -> None:
-    top_indices = result.top_anomalies(MAX_EXPLANATIONS)
-    if len(top_indices) == 0:
-        return
-
+def _ask_llm(provider: str, chat: list[dict], question: str, report_for_llm: str, index: int) -> bool:
+    """Вопрос в чат по потоку; ответ показывается по мере генерации. True — ответ сохранён."""
     user = st.session_state.get("user")
     role = st.session_state.get("role")
-    allow_llm = can_use_llm(role)
-
-    st.subheader("Пояснения")
-    if st.button(
-        f"Сгенерировать пояснения для {len(top_indices)} аномалий",
-        type="primary",
-    ):
-        if not allow_llm:
-            st.info("Роль viewer: пояснения ИИ отключены, доступна только статистика.")
-        llm_ready = allow_llm and is_llm_configured()
-        if allow_llm and not llm_ready:
-            st.warning(
-                "GEMINI_API_KEY не задан — будут показаны только статистические отклонения."
+    content = first_message(report_for_llm, question)["content"] if not chat else question
+    messages = [{"role": m["role"], "content": m["content"]} for m in chat]
+    messages.append({"role": "user", "content": content})
+    with st.chat_message("user"):
+        st.markdown(question)
+    with st.chat_message("assistant"):
+        try:
+            api_key = st.session_state.llm_keys.get(provider)
+            answer = st.write_stream(
+                stream_chat(provider, messages, system=SYSTEM_PROMPT, api_key=api_key)
             )
+        except LlmUnavailableError as exc:
+            st.warning(str(exc))
+            log_event(user, role, "llm_ask", row=index, provider=provider, ok=False, error=str(exc))
+            return False
+        except Exception as exc:  # неожиданная ошибка SDK
+            logger.exception("LLM error")
+            st.warning(f"Ошибка LLM: {exc}")
+            log_event(user, role, "llm_ask", row=index, provider=provider, ok=False, error=str(exc))
+            return False
+    answer = answer if isinstance(answer, str) else "".join(map(str, answer))
+    chat.append({"role": "user", "content": content, "shown": question})
+    chat.append({"role": "assistant", "content": answer, "shown": answer, "provider": provider})
+    log_event(user, role, "llm_ask", row=index, provider=provider, ok=bool(answer.strip()), error=None)
+    return True
 
-        progress = st.progress(0.0, text="Готовим пояснения…")
-        for position, index in enumerate(top_indices, start=1):
-            index = int(index)
-            stats_text = explain_anomaly(result.X.iloc[index], means, stds)
-            entry = {
-                "label": _true_label(result, index),
-                "stats": stats_text,
-                "score": float(result.scores[index]),
-                "percentile": (
-                    float(result.percentiles[index])
-                    if result.percentiles is not None
-                    else None
-                ),
-                "llm": None,
-                "error": None,
-            }
 
-            if llm_ready:
-                try:
-                    chunks = []
-                    for chunk in stream_gemini_explanation(stats_text):
-                        chunks.append(chunk)
-                    entry["llm"] = "".join(chunks).strip()
-                except LlmUnavailableError as exc:
-                    entry["error"] = str(exc)
-                except Exception as exc:  # неожиданная ошибка SDK
-                    logger.exception("Gemini error")
-                    entry["error"] = f"Ошибка Gemini: {exc}"
-                log_event(
-                    user,
-                    role,
-                    "llm_explain",
-                    row=index,
-                    ok=bool(entry["llm"]),
-                    error=entry["error"],
-                )
+def _render_flow_review(
+    result: DetectionResult,
+    means,
+    stds,
+    brute,
+    brute_probs,
+    brute_mask,
+    incidents,
+    provider: str | None,
+) -> None:
+    """Любой поток: факты моделей, вопрос к ИИ, уточнения в чате, отчёт в Markdown."""
+    st.subheader("Разбор потока")
+    candidates = flagged_candidates(result, brute_probs, brute_mask)
+    modes = (["Из тревог"] if candidates else []) + ["По номеру строки"]
+    mode = st.radio("Какой поток разобрать", modes, horizontal=True, key="flow_mode")
+    if mode == "Из тревог":
+        index = st.selectbox(
+            f"Тревоги ({len(candidates):,}, сначала самые уверенные)",
+            candidates,
+            format_func=lambda i: _flow_title(result, i, brute, brute_probs),
+            key="flow_pick",
+        )
+    else:
+        index = int(
+            st.number_input(
+                "Номер строки", min_value=0, max_value=result.total - 1, value=0, step=1,
+                key="flow_row",
+            )
+        )
+    index = int(index)
 
-            st.session_state.explanations[index] = entry
-            progress.progress(position / len(top_indices), text=f"{position} из {len(top_indices)}")
+    report_kwargs = dict(
+        brute=brute, brute_probs=brute_probs, brute_mask=brute_mask, incidents=incidents
+    )
+    report = build_flow_report(result, index, means, stds, mask_ips=False, **report_kwargs)
+    with st.expander("Факты о потоке", expanded=True):
+        st.markdown(report)
 
-        progress.empty()
+    chat = st.session_state.explanations.setdefault(index, [])
+    for message in chat:
+        with st.chat_message(message["role"]):
+            st.markdown(message["shown"])
 
-    for index in top_indices:
-        index = int(index)
-        entry = st.session_state.explanations.get(index)
-        if not entry:
-            continue
+    if not can_use_llm(st.session_state.get("role")):
+        st.caption("Роль viewer: вопросы к ИИ отключены, доступны только факты моделей.")
+    elif provider is None:
+        st.caption(
+            "ИИ не настроен: задайте GEMINI_API_KEY или OPENAI_API_KEY / OPENAI_BASE_URL."
+        )
+    else:
+        # Подпись и параметры поля не меняются после первого ответа: иначе
+        # Streamlit считает его новым виджетом и теряет введённый вопрос
+        with st.form(key=f"ask_{index}", clear_on_submit=True):
+            question = st.text_area(
+                "Вопрос к ИИ (пустой первый вопрос — «почему сработало»)",
+                placeholder=DEFAULT_QUESTION,
+                height=80,
+            )
+            asked = st.form_submit_button(
+                f"Спросить · {provider_label(provider)}", type="primary"
+            )
+        st.caption("В LLM уходят признаки и решения моделей; адреса замаскированы.")
+        question = question.strip() or ("" if chat else DEFAULT_QUESTION)
+        if asked and question:
+            masked = build_flow_report(result, index, means, stds, mask_ips=True, **report_kwargs)
+            if _ask_llm(provider, chat, question, masked, index):
+                st.rerun()  # история над формой, как при следующих вопросах
 
-        st.markdown(f"**Аномалия #{index}** (истинная метка: `{entry['label']}`)")
-        details = f"score {entry['score']:.4f}"
-        if entry.get("percentile") is not None:
-            details += f", аномальнее {entry['percentile']:.1f}% нормы"
-        st.caption(details)
-        with st.expander("Показать статистические отклонения"):
-            st.code(entry["stats"])
-
-        with st.chat_message("assistant"):
-            if entry.get("llm"):
-                st.markdown(entry["llm"])
-            elif entry.get("error"):
-                st.warning(entry["error"])
-            else:
-                st.caption("Пояснение ИИ не запрашивалось.")
-
-        st.divider()
+    document = [f"# Разбор потока #{index}", "", report]
+    if chat:
+        document += ["", "## Разбор ИИ"]
+        for message in chat:
+            who = (
+                f"**Ответ ({provider_label(message['provider'])}):**"
+                if message["role"] == "assistant"
+                else "**Вопрос:**"
+            )
+            document += ["", who, "", message["shown"]]
+    st.download_button(
+        "Скачать отчёт (Markdown)",
+        "\n".join(document),
+        file_name=f"flow_{index}.md",
+        mime="text/markdown",
+        key=f"report_{index}",
+    )
 
 
 def _compute_brute(result: DetectionResult, brute):
@@ -431,14 +477,23 @@ def _compute_brute(result: DetectionResult, brute):
         return None
 
 
-def _render_incidents(result: DetectionResult, brute, brute_probs, brute_mask) -> None:
-    """Подозрительные потоки, сведённые в инциденты по внешнему адресу за час."""
+def _compute_incidents(result: DetectionResult, brute_probs, brute_mask):
+    """Инциденты по внешнему адресу за час; None — если адресов в файле нет."""
     try:
         trusted = parse_trusted(os.environ.get("TRUSTED_IPS", ""))
     except ValueError as exc:
         st.warning(f"TRUSTED_IPS не разобран ({exc}) — доверенных адресов нет.")
         trusted = []
-    incidents = aggregate_alerts(result.df, brute_mask, brute_probs, trusted=trusted)
+    try:
+        return aggregate_alerts(result.df, brute_mask, brute_probs, trusted=trusted)
+    except Exception as exc:  # битые адреса/время в загруженном файле
+        logger.exception("Инциденты не собраны")
+        st.warning(f"Инциденты не собраны: {exc}")
+        return None
+
+
+def _render_incidents(brute, brute_mask, incidents) -> None:
+    """Подозрительные потоки, сведённые в инциденты по внешнему адресу за час."""
     if incidents is None:
         st.caption(
             "Инциденты по адресам не собраны: в файле нет Src/Dst IP и портов "
@@ -479,6 +534,7 @@ def _render_analysis(
     stds,
     brute=None,
     brute_payload=None,
+    provider: str | None = None,
 ) -> None:
     brute_probs = None
     brute_mask = None
@@ -506,12 +562,13 @@ def _render_analysis(
     if result.n_anomalies:
         st.subheader("Аномальные записи (IsolationForest)")
         st.dataframe(result.df[result.mask].head(10), hide_index=True)
-        _render_explanations(result, means, stds)
     else:
         st.success("Аномалий IsolationForest не обнаружено")
 
+    incidents = None
     if brute_mask is not None and brute_mask.any():
-        _render_incidents(result, brute, brute_probs, brute_mask)
+        incidents = _compute_incidents(result, brute_probs, brute_mask)
+        _render_incidents(brute, brute_mask, incidents)
         st.subheader(f"Подозрения: {brute.display_name} (supervised)")
         flagged = np.flatnonzero(brute_mask)
         top = flagged[np.argsort(-brute_probs[flagged])][:10]
@@ -523,16 +580,62 @@ def _render_analysis(
             f"{'целевой сети' if brute.metadata.get('adaptation') else 'CICIDS'}. "
             f"Совпадений с IF: {int((result.mask & brute_mask).sum()):,}."
         )
-        with st.expander(f"Статистические отклонения топ-3: {brute.display_name}"):
-            for index in top[:3]:
-                st.markdown(f"**Строка #{int(index)}** — p={brute_probs[index]:.3f}")
-                st.code(explain_anomaly(result.X.iloc[int(index)], means, stds))
+
+    _render_flow_review(
+        result, means, stds, brute, brute_probs, brute_mask, incidents, provider
+    )
 
 
 def _reset_analysis() -> None:
     st.session_state.analysis = None
     st.session_state.explanations = {}
     st.session_state.brute = None
+
+
+def _render_llm_keys(user, role) -> dict:
+    """Ключ API из интерфейса: только в памяти этой сессии, не на диске и не в аудите."""
+    keys = st.session_state.llm_keys
+    with st.sidebar.expander("Ключ API для ИИ", expanded=not configured_providers(keys)):
+        with st.form("llm_key_form", clear_on_submit=True):
+            name = st.selectbox("Провайдер", list(PROVIDERS), format_func=PROVIDERS.get)
+            key = st.text_input("Ключ", type="password")
+            saved = st.form_submit_button("Сохранить на эту сессию")
+        if saved and key.strip():
+            keys[name] = key.strip()
+            st.session_state.llm_provider = name
+            log_event(user, role, "llm_key_set", provider=name)  # без самого ключа
+        for name in keys:
+            st.caption(f"{PROVIDERS[name]}: ключ введён")
+        if keys and st.button("Забыть ключи", key="llm_keys_clear"):
+            keys.clear()
+            log_event(user, role, "llm_key_clear")
+            st.rerun()
+        st.caption(
+            "Ключ хранится только в памяти этой сессии и пропадает при выходе. "
+            "Адрес OpenAI-совместимого API — OPENAI_BASE_URL (по умолчанию OpenAI)."
+        )
+    return keys
+
+
+def _select_llm_provider(user, role) -> str | None:
+    """LLM для разбора потоков: по умолчанию LLM_PROVIDER, выбор — на сессию."""
+    if not can_use_llm(role):
+        st.sidebar.caption("ИИ: недоступен для роли viewer")
+        return None
+    keys = _render_llm_keys(user, role)
+    providers = configured_providers(keys)
+    if not providers:
+        st.sidebar.caption("ИИ: не настроен — введите ключ выше или задайте GEMINI_API_KEY / OPENAI_API_KEY")
+        return None
+    current = st.session_state.llm_provider or default_provider(keys)
+    provider = st.sidebar.selectbox(
+        "LLM для разбора",
+        providers,
+        index=providers.index(current) if current in providers else 0,
+        format_func=provider_label,
+    )
+    st.session_state.llm_provider = provider
+    return provider
 
 
 def _select_model(user, role) -> ModelEntry | None:
@@ -651,9 +754,7 @@ def main() -> None:
     st.sidebar.caption(
         (f"{brute.display_name}: supervised" if brute is not None else "Supervised: нет модели")
     )
-    st.sidebar.caption(
-        "ИИ: " + ("подключён" if is_llm_configured() else "не настроен (GEMINI_API_KEY)")
-    )
+    provider = _select_llm_provider(user, role)
 
     st.title("Анализатор аномалий сетевого трафика")
     st.caption(
@@ -758,7 +859,7 @@ def main() -> None:
     result = st.session_state.analysis
     if result is not None:
         _render_analysis(
-            result, means, stds, brute, st.session_state.get("brute")
+            result, means, stds, brute, st.session_state.get("brute"), provider
         )
 
 
