@@ -1,0 +1,1217 @@
+{
+  "version": "flagship",
+  "created_at": "2026-11-01T16:27:06+00:00",
+  "note": "Одна модель на всех сетях (cic2017, cic2018, serverA, serverB), каждая с равным весом. Проверка «без одной сети» и на CIC-DDoS2019 — в lono и external.",
+  "networks": {
+    "cic2017": {
+      "train": 83200,
+      "calib": 12800,
+      "test": 24000,
+      "attacks_train": 31996
+    },
+    "cic2018": {
+      "train": 83185,
+      "calib": 12815,
+      "test": 24000,
+      "attacks_train": 31922
+    },
+    "serverA": {
+      "train": 76271,
+      "calib": 16000,
+      "test": 21527,
+      "attacks_train": 12271
+    },
+    "serverB": {
+      "train": 69275,
+      "calib": 16000,
+      "test": 21261,
+      "attacks_train": 5275
+    }
+  },
+  "log1p": true,
+  "target_fpr": 0.02,
+  "threshold": -0.10483385283642566,
+  "rf_target_fpr": 0.001,
+  "lono": {
+    "cic2017": {
+      "isolation_forest": {
+        "rows": 24000,
+        "attacks": 8004,
+        "auc": 0.8002995017245066,
+        "fpr": 0.021692923230807702,
+        "recall": 0.0002498750624687656,
+        "recall_oracle": 0.0001249375312343828,
+        "families": {
+          "Bot": {
+            "n": 287,
+            "auc": 0.6469667286159518,
+            "recall": 0.0,
+            "recall_oracle": 0.0
+          },
+          "BruteForce": {
+            "n": 1824,
+            "auc": 0.591105013095379,
+            "recall": 0.0,
+            "recall_oracle": 0.0
+          },
+          "DDoS": {
+            "n": 2561,
+            "auc": 0.9140261563829067,
+            "recall": 0.0,
+            "recall_oracle": 0.0
+          },
+          "DoS": {
+            "n": 2510,
+            "auc": 0.8682905412608132,
+            "recall": 0.00039840637450199205,
+            "recall_oracle": 0.0
+          },
+          "Infiltration": {
+            "n": 8,
+            "auc": 0.8765550762690673,
+            "recall": 0.125,
+            "recall_oracle": 0.125
+          },
+          "PortScan": {
+            "n": 383,
+            "auc": 0.7306098717890961,
+            "recall": 0.0,
+            "recall_oracle": 0.0
+          },
+          "Web": {
+            "n": 431,
+            "auc": 0.776510325377168,
+            "recall": 0.0,
+            "recall_oracle": 0.0
+          }
+        }
+      },
+      "supervised": {
+        "rows": 24000,
+        "attacks": 8004,
+        "auc": 0.6135425777671304,
+        "fpr": 0.006251562890722681,
+        "recall": 0.013493253373313344,
+        "recall_oracle": 0.007746126936531734,
+        "families": {
+          "Bot": {
+            "n": 287,
+            "auc": 0.6801419431512932,
+            "recall": 0.0,
+            "recall_oracle": 0.0
+          },
+          "BruteForce": {
+            "n": 1824,
+            "auc": 0.9082670201541614,
+            "recall": 0.0027412280701754384,
+            "recall_oracle": 0.001644736842105263
+          },
+          "DDoS": {
+            "n": 2561,
+            "auc": 0.42439961317935887,
+            "recall": 0.0,
+            "recall_oracle": 0.0
+          },
+          "DoS": {
+            "n": 2510,
+            "auc": 0.5967667713741184,
+            "recall": 0.04063745019920319,
+            "recall_oracle": 0.02350597609561753
+          },
+          "Infiltration": {
+            "n": 8,
+            "auc": 0.4179951237809453,
+            "recall": 0.0,
+            "recall_oracle": 0.0
+          },
+          "PortScan": {
+            "n": 383,
+            "auc": 0.8579182981123871,
+            "recall": 0.0,
+            "recall_oracle": 0.0
+          },
+          "Web": {
+            "n": 431,
+            "auc": 0.3299682954381287,
+            "recall": 0.002320185614849188,
+            "recall_oracle": 0.0
+          }
+        }
+      }
+    },
+    "cic2018": {
+      "isolation_forest": {
+        "rows": 24000,
+        "attacks": 8078,
+        "auc": 0.6106999510083805,
+        "fpr": 0.010614244441653058,
+        "recall": 0.014607576132706116,
+        "recall_oracle": 0.018073780638771974,
+        "families": {
+          "Bot": {
+            "n": 1607,
+            "auc": 0.8178763233363769,
+            "recall": 0.00373366521468575,
+            "recall_oracle": 0.0043559427504667085
+          },
+          "BruteForce": {
+            "n": 1642,
+            "auc": 0.6186866975286495,
+            "recall": 0.0,
+            "recall_oracle": 0.0
+          },
+          "DDoS": {
+            "n": 1565,
+            "auc": 0.7713641943773017,
+            "recall": 0.0,
+            "recall_oracle": 0.0038338658146964857
+          },
+          "DoS": {
+            "n": 1516,
+            "auc": 0.4160499080444608,
+            "recall": 0.009894459102902375,
+            "recall_oracle": 0.010554089709762533
+          },
+          "Infiltration": {
+            "n": 1591,
+            "auc": 0.41414485971088943,
+            "recall": 0.0251414204902577,
+            "recall_oracle": 0.03268384663733501
+          },
+          "Web": {
+            "n": 157,
+            "auc": 0.6764477624598261,
+            "recall": 0.3630573248407643,
+            "recall_oracle": 0.4140127388535032
+          }
+        }
+      },
+      "supervised": {
+        "rows": 24000,
+        "attacks": 8078,
+        "auc": 0.6126449949632211,
+        "fpr": 0.0037683708076874764,
+        "recall": 0.047288932904184205,
+        "recall_oracle": 0.03973755880168359,
+        "families": {
+          "Bot": {
+            "n": 1607,
+            "auc": 0.7566815301445824,
+            "recall": 0.0,
+            "recall_oracle": 0.0
+          },
+          "BruteForce": {
+            "n": 1642,
+            "auc": 0.3638331797476156,
+            "recall": 0.0006090133982947625,
+            "recall_oracle": 0.0
+          },
+          "DDoS": {
+            "n": 1565,
+            "auc": 0.7095068290183013,
+            "recall": 0.0,
+            "recall_oracle": 0.0
+          },
+          "DoS": {
+            "n": 1516,
+            "auc": 0.8265239447318873,
+            "recall": 0.24406332453825857,
+            "recall_oracle": 0.21108179419525067
+          },
+          "Infiltration": {
+            "n": 1591,
+            "auc": 0.4107748995712994,
+            "recall": 0.0069138906348208675,
+            "recall_oracle": 0.0006285355122564425
+          },
+          "Web": {
+            "n": 157,
+            "auc": 0.7555007412729413,
+            "recall": 0.0,
+            "recall_oracle": 0.0
+          }
+        }
+      }
+    },
+    "serverA": {
+      "isolation_forest": {
+        "rows": 21527,
+        "attacks": 1527,
+        "auc": 0.6122844957432875,
+        "fpr": 0.02805,
+        "recall": 0.0,
+        "recall_oracle": 0.0,
+        "families": {
+          "BruteForce": {
+            "n": 1491,
+            "auc": 0.6085473340040242,
+            "recall": 0.0,
+            "recall_oracle": 0.0
+          },
+          "Other": {
+            "n": 36,
+            "auc": 0.7670652777777778,
+            "recall": 0.0,
+            "recall_oracle": 0.0
+          }
+        }
+      },
+      "supervised": {
+        "rows": 21527,
+        "attacks": 1527,
+        "auc": 0.9995037328094304,
+        "fpr": 0.00025,
+        "recall": 0.925343811394892,
+        "recall_oracle": 0.9443352979698756,
+        "families": {
+          "BruteForce": {
+            "n": 1491,
+            "auc": 0.9996425553319919,
+            "recall": 0.937625754527163,
+            "recall_oracle": 0.9557344064386318
+          },
+          "Other": {
+            "n": 36,
+            "auc": 0.9937541666666666,
+            "recall": 0.4166666666666667,
+            "recall_oracle": 0.4722222222222222
+          }
+        }
+      }
+    },
+    "serverB": {
+      "isolation_forest": {
+        "rows": 21261,
+        "attacks": 1261,
+        "auc": 0.5677204599524187,
+        "fpr": 0.037,
+        "recall": 0.0,
+        "recall_oracle": 0.0,
+        "families": {
+          "BruteForce": {
+            "n": 1238,
+            "auc": 0.5630392972536349,
+            "recall": 0.0,
+            "recall_oracle": 0.0
+          },
+          "Other": {
+            "n": 23,
+            "auc": 0.8196891304347826,
+            "recall": 0.0,
+            "recall_oracle": 0.0
+          }
+        }
+      },
+      "supervised": {
+        "rows": 21261,
+        "attacks": 1261,
+        "auc": 0.9976439730372721,
+        "fpr": 5e-05,
+        "recall": 0.0,
+        "recall_oracle": 0.1681205392545599,
+        "families": {
+          "BruteForce": {
+            "n": 1238,
+            "auc": 0.9977602180936994,
+            "recall": 0.0,
+            "recall_oracle": 0.15751211631663975
+          },
+          "Other": {
+            "n": 23,
+            "auc": 0.9913869565217391,
+            "recall": 0.0,
+            "recall_oracle": 0.7391304347826086
+          }
+        }
+      }
+    }
+  },
+  "in_domain": {
+    "cic2017": {
+      "isolation_forest": {
+        "rows": 24000,
+        "attacks": 8004,
+        "auc": 0.8311813320021659,
+        "fpr": 0.02188047011752938,
+        "recall": 0.007621189405297352,
+        "recall_oracle": 0.006496751624187906,
+        "families": {
+          "Bot": {
+            "n": 287,
+            "auc": 0.7389964869266097,
+            "recall": 0.0,
+            "recall_oracle": 0.0
+          },
+          "BruteForce": {
+            "n": 1824,
+            "auc": 0.7278505138894372,
+            "recall": 0.0,
+            "recall_oracle": 0.0
+          },
+          "DDoS": {
+            "n": 2561,
+            "auc": 0.885460724806348,
+            "recall": 0.0,
+            "recall_oracle": 0.0
+          },
+          "DoS": {
+            "n": 2510,
+            "auc": 0.8687711270447095,
+            "recall": 0.021912350597609563,
+            "recall_oracle": 0.0199203187250996
+          },
+          "Infiltration": {
+            "n": 8,
+            "auc": 0.9018348337084271,
+            "recall": 0.125,
+            "recall_oracle": 0.125
+          },
+          "PortScan": {
+            "n": 383,
+            "auc": 0.8041827689298304,
+            "recall": 0.013054830287206266,
+            "recall_oracle": 0.0026109660574412533
+          },
+          "Web": {
+            "n": 431,
+            "auc": 0.811106561443145,
+            "recall": 0.0,
+            "recall_oracle": 0.0
+          }
+        }
+      },
+      "supervised": {
+        "rows": 24000,
+        "attacks": 8004,
+        "auc": 0.9996076410094528,
+        "fpr": 0.0018129532383095773,
+        "recall": 0.9816341829085458,
+        "recall_oracle": 0.9753873063468266,
+        "families": {
+          "Bot": {
+            "n": 287,
+            "auc": 0.9958445621858426,
+            "recall": 0.8362369337979094,
+            "recall_oracle": 0.8292682926829268
+          },
+          "BruteForce": {
+            "n": 1824,
+            "auc": 0.9998669143711365,
+            "recall": 0.987390350877193,
+            "recall_oracle": 0.9775219298245614
+          },
+          "DDoS": {
+            "n": 2561,
+            "auc": 0.9998747246358642,
+            "recall": 0.9972666926981648,
+            "recall_oracle": 0.9964857477547833
+          },
+          "DoS": {
+            "n": 2510,
+            "auc": 0.9997359399610859,
+            "recall": 0.9824701195219123,
+            "recall_oracle": 0.9764940239043824
+          },
+          "Infiltration": {
+            "n": 8,
+            "auc": 0.9382189297324331,
+            "recall": 0.0,
+            "recall_oracle": 0.0
+          },
+          "PortScan": {
+            "n": 383,
+            "auc": 0.9998589725760423,
+            "recall": 0.9921671018276762,
+            "recall_oracle": 0.9921671018276762
+          },
+          "Web": {
+            "n": 431,
+            "auc": 0.9995981448958527,
+            "recall": 0.9651972157772621,
+            "recall_oracle": 0.9350348027842227
+          }
+        }
+      }
+    },
+    "cic2018": {
+      "isolation_forest": {
+        "rows": 24000,
+        "attacks": 8078,
+        "auc": 0.6615515835290008,
+        "fpr": 0.008981283758321818,
+        "recall": 0.011141371626640258,
+        "recall_oracle": 0.016340678385739046,
+        "families": {
+          "Bot": {
+            "n": 1607,
+            "auc": 0.8666771942904298,
+            "recall": 0.001866832607342875,
+            "recall_oracle": 0.001866832607342875
+          },
+          "BruteForce": {
+            "n": 1642,
+            "auc": 0.6206370933452836,
+            "recall": 0.0,
+            "recall_oracle": 0.0
+          },
+          "DDoS": {
+            "n": 1565,
+            "auc": 0.7818845706685909,
+            "recall": 0.0,
+            "recall_oracle": 0.014057507987220448
+          },
+          "DoS": {
+            "n": 1516,
+            "auc": 0.5323065710510242,
+            "recall": 0.010554089709762533,
+            "recall_oracle": 0.010554089709762533
+          },
+          "Infiltration": {
+            "n": 1591,
+            "auc": 0.49677602179259966,
+            "recall": 0.03205531112507857,
+            "recall_oracle": 0.04085480829666876
+          },
+          "Web": {
+            "n": 157,
+            "auc": 0.7081564825978877,
+            "recall": 0.12738853503184713,
+            "recall_oracle": 0.16560509554140126
+          }
+        }
+      },
+      "supervised": {
+        "rows": 24000,
+        "attacks": 8078,
+        "auc": 0.9669446984353254,
+        "fpr": 0.002198216304484361,
+        "recall": 0.79796979450359,
+        "recall_oracle": 0.7848477345877692,
+        "families": {
+          "Bot": {
+            "n": 1607,
+            "auc": 0.9998060121499278,
+            "recall": 0.9875544492843809,
+            "recall_oracle": 0.984443061605476
+          },
+          "BruteForce": {
+            "n": 1642,
+            "auc": 0.9999809898468187,
+            "recall": 0.9981729598051157,
+            "recall_oracle": 0.997563946406821
+          },
+          "DDoS": {
+            "n": 1565,
+            "auc": 0.9997476515906417,
+            "recall": 0.9878594249201278,
+            "recall_oracle": 0.9712460063897763
+          },
+          "DoS": {
+            "n": 1516,
+            "auc": 0.9995939969886177,
+            "recall": 0.9887862796833773,
+            "recall_oracle": 0.9782321899736148
+          },
+          "Infiltration": {
+            "n": 1591,
+            "auc": 0.8345540536198188,
+            "recall": 0.04902576995600252,
+            "recall_oracle": 0.0251414204902577
+          },
+          "Web": {
+            "n": 157,
+            "auc": 0.984440468942144,
+            "recall": 0.6178343949044586,
+            "recall_oracle": 0.49044585987261147
+          }
+        }
+      }
+    },
+    "serverA": {
+      "isolation_forest": {
+        "rows": 21527,
+        "attacks": 1527,
+        "auc": 0.6269971676489849,
+        "fpr": 0.0171,
+        "recall": 0.0,
+        "recall_oracle": 0.0,
+        "families": {
+          "BruteForce": {
+            "n": 1491,
+            "auc": 0.6221548792756539,
+            "recall": 0.0,
+            "recall_oracle": 0.0
+          },
+          "Other": {
+            "n": 36,
+            "auc": 0.8275486111111111,
+            "recall": 0.0,
+            "recall_oracle": 0.0
+          }
+        }
+      },
+      "supervised": {
+        "rows": 21527,
+        "attacks": 1527,
+        "auc": 0.9999262606417814,
+        "fpr": 0.0003,
+        "recall": 0.9783889980353635,
+        "recall_oracle": 0.9823182711198428,
+        "families": {
+          "BruteForce": {
+            "n": 1491,
+            "auc": 0.9999671026156942,
+            "recall": 0.9879275653923542,
+            "recall_oracle": 0.9899396378269618
+          },
+          "Other": {
+            "n": 36,
+            "auc": 0.9982347222222223,
+            "recall": 0.5833333333333334,
+            "recall_oracle": 0.6666666666666666
+          }
+        }
+      }
+    },
+    "serverB": {
+      "isolation_forest": {
+        "rows": 21261,
+        "attacks": 1261,
+        "auc": 0.7656844567803331,
+        "fpr": 0.02685,
+        "recall": 0.0,
+        "recall_oracle": 0.0,
+        "families": {
+          "BruteForce": {
+            "n": 1238,
+            "auc": 0.7636391357027463,
+            "recall": 0.0,
+            "recall_oracle": 0.0
+          },
+          "Other": {
+            "n": 23,
+            "auc": 0.8757760869565218,
+            "recall": 0.0,
+            "recall_oracle": 0.0
+          }
+        }
+      },
+      "supervised": {
+        "rows": 21261,
+        "attacks": 1261,
+        "auc": 0.9999856066613798,
+        "fpr": 0.00025,
+        "recall": 0.9896907216494846,
+        "recall_oracle": 0.9976209357652657,
+        "families": {
+          "BruteForce": {
+            "n": 1238,
+            "auc": 0.9999894588045234,
+            "recall": 0.9951534733441034,
+            "recall_oracle": 0.9983844911147012
+          },
+          "Other": {
+            "n": 23,
+            "auc": 0.9997782608695653,
+            "recall": 0.6956521739130435,
+            "recall_oracle": 0.9565217391304348
+          }
+        }
+      }
+    }
+  },
+  "baseline": {
+    "cic2017": {
+      "isolation_forest": {
+        "rows": 24000,
+        "attacks": 8004,
+        "auc": 0.8054041090232578,
+        "fpr": 0.028882220555138786,
+        "recall": 0.2318840579710145,
+        "recall_oracle": 0.10782108945527237,
+        "families": {
+          "Bot": {
+            "n": 287,
+            "auc": 0.5494607536901647,
+            "recall": 0.020905923344947737,
+            "recall_oracle": 0.017421602787456445
+          },
+          "BruteForce": {
+            "n": 1824,
+            "auc": 0.7267117115079209,
+            "recall": 0.0,
+            "recall_oracle": 0.0
+          },
+          "DDoS": {
+            "n": 2561,
+            "auc": 0.8250108822598075,
+            "recall": 0.16985552518547442,
+            "recall_oracle": 0.12377977352596642
+          },
+          "DoS": {
+            "n": 2510,
+            "auc": 0.9123869737354657,
+            "recall": 0.5597609561752988,
+            "recall_oracle": 0.2151394422310757
+          },
+          "Infiltration": {
+            "n": 8,
+            "auc": 0.8623874718679669,
+            "recall": 0.5,
+            "recall_oracle": 0.125
+          },
+          "PortScan": {
+            "n": 383,
+            "auc": 0.6496995495610195,
+            "recall": 0.007832898172323759,
+            "recall_oracle": 0.0
+          },
+          "Web": {
+            "n": 431,
+            "auc": 0.7066331548084237,
+            "recall": 0.0069605568445475635,
+            "recall_oracle": 0.0
+          }
+        }
+      },
+      "supervised": {
+        "rows": 24000,
+        "attacks": 8004,
+        "auc": 0.7951453677387361,
+        "fpr": 0.001250312578144536,
+        "recall": 0.23175912043978011,
+        "recall_oracle": 0.23163418290854573,
+        "families": {
+          "Bot": {
+            "n": 287,
+            "auc": 0.6721387446164678,
+            "recall": 0.0,
+            "recall_oracle": 0.0
+          },
+          "BruteForce": {
+            "n": 1824,
+            "auc": 0.9999997600825644,
+            "recall": 1.0,
+            "recall_oracle": 1.0
+          },
+          "DDoS": {
+            "n": 2561,
+            "auc": 0.9655329929710073,
+            "recall": 0.0,
+            "recall_oracle": 0.0
+          },
+          "DoS": {
+            "n": 2510,
+            "auc": 0.45777943489856526,
+            "recall": 0.004780876494023904,
+            "recall_oracle": 0.004382470119521913
+          },
+          "Infiltration": {
+            "n": 8,
+            "auc": 0.6414337959489873,
+            "recall": 0.0,
+            "recall_oracle": 0.0
+          },
+          "PortScan": {
+            "n": 383,
+            "auc": 0.8781150901302349,
+            "recall": 0.0,
+            "recall_oracle": 0.0
+          },
+          "Web": {
+            "n": 431,
+            "auc": 0.8914946979204198,
+            "recall": 0.04408352668213457,
+            "recall_oracle": 0.04408352668213457
+          }
+        },
+        "display_name": "BruteForce"
+      }
+    },
+    "cic2018": {
+      "isolation_forest": {
+        "rows": 24000,
+        "attacks": 8078,
+        "auc": 0.45735342967304804,
+        "fpr": 0.00558975003140309,
+        "recall": 0.01559792027729636,
+        "recall_oracle": 0.022654122307501856,
+        "families": {
+          "Bot": {
+            "n": 1607,
+            "auc": 0.3728098836213598,
+            "recall": 0.0,
+            "recall_oracle": 0.0
+          },
+          "BruteForce": {
+            "n": 1642,
+            "auc": 0.5573684348225614,
+            "recall": 0.0,
+            "recall_oracle": 0.0
+          },
+          "DDoS": {
+            "n": 1565,
+            "auc": 0.49014163696583146,
+            "recall": 0.0,
+            "recall_oracle": 0.0019169329073482429
+          },
+          "DoS": {
+            "n": 1516,
+            "auc": 0.42509020724050856,
+            "recall": 0.051451187335092345,
+            "recall_oracle": 0.06068601583113457
+          },
+          "Infiltration": {
+            "n": 1591,
+            "auc": 0.42454257876096313,
+            "recall": 0.0043997485857950975,
+            "recall_oracle": 0.018856065367693273
+          },
+          "Web": {
+            "n": 157,
+            "auc": 0.5938910388782256,
+            "recall": 0.2611464968152866,
+            "recall_oracle": 0.36942675159235666
+          }
+        }
+      },
+      "supervised": {
+        "rows": 24000,
+        "attacks": 8078,
+        "auc": 0.6824238078931399,
+        "fpr": 0.0007536741615374953,
+        "recall": 0.002723446397623174,
+        "recall_oracle": 0.002847239415696955,
+        "families": {
+          "Bot": {
+            "n": 1607,
+            "auc": 0.8135153193535973,
+            "recall": 0.0,
+            "recall_oracle": 0.0
+          },
+          "BruteForce": {
+            "n": 1642,
+            "auc": 0.9982027946531667,
+            "recall": 0.0006090133982947625,
+            "recall_oracle": 0.0006090133982947625
+          },
+          "DDoS": {
+            "n": 1565,
+            "auc": 0.530032430462723,
+            "recall": 0.0,
+            "recall_oracle": 0.0
+          },
+          "DoS": {
+            "n": 1516,
+            "auc": 0.6083346328191623,
+            "recall": 0.013852242744063324,
+            "recall_oracle": 0.013852242744063324
+          },
+          "Infiltration": {
+            "n": 1591,
+            "auc": 0.47666223404780267,
+            "recall": 0.0,
+            "recall_oracle": 0.0006285355122564425
+          },
+          "Web": {
+            "n": 157,
+            "auc": 0.3576161894330402,
+            "recall": 0.0,
+            "recall_oracle": 0.0
+          }
+        },
+        "display_name": "BruteForce"
+      }
+    },
+    "serverA": {
+      "isolation_forest": {
+        "rows": 21527,
+        "attacks": 1527,
+        "auc": 0.7001386051080549,
+        "fpr": 0.1035,
+        "recall": 0.0045841519318926,
+        "recall_oracle": 0.0,
+        "families": {
+          "BruteForce": {
+            "n": 1491,
+            "auc": 0.7039073608316566,
+            "recall": 0.004694835680751174,
+            "recall_oracle": 0.0
+          },
+          "Other": {
+            "n": 36,
+            "auc": 0.5440493055555555,
+            "recall": 0.0,
+            "recall_oracle": 0.0
+          }
+        }
+      },
+      "supervised": {
+        "rows": 21527,
+        "attacks": 1527,
+        "auc": 0.9380112639161755,
+        "fpr": 0.01775,
+        "recall": 0.13294040602488538,
+        "recall_oracle": 0.0,
+        "families": {
+          "BruteForce": {
+            "n": 1491,
+            "auc": 0.9404178739101274,
+            "recall": 0.13615023474178403,
+            "recall_oracle": 0.0
+          },
+          "Other": {
+            "n": 36,
+            "auc": 0.8383375000000001,
+            "recall": 0.0,
+            "recall_oracle": 0.0
+          }
+        },
+        "display_name": "BruteForce"
+      }
+    },
+    "serverB": {
+      "isolation_forest": {
+        "rows": 21261,
+        "attacks": 1261,
+        "auc": 0.7493867367168914,
+        "fpr": 0.082,
+        "recall": 0.003965107057890563,
+        "recall_oracle": 0.0,
+        "families": {
+          "BruteForce": {
+            "n": 1238,
+            "auc": 0.7512167609046849,
+            "recall": 0.004038772213247173,
+            "recall_oracle": 0.0
+          },
+          "Other": {
+            "n": 23,
+            "auc": 0.6508836956521739,
+            "recall": 0.0,
+            "recall_oracle": 0.0
+          }
+        }
+      },
+      "supervised": {
+        "rows": 21261,
+        "attacks": 1261,
+        "auc": 0.8641663957176844,
+        "fpr": 0.01335,
+        "recall": 0.2014274385408406,
+        "recall_oracle": 0.0,
+        "families": {
+          "BruteForce": {
+            "n": 1238,
+            "auc": 0.8682262924071082,
+            "recall": 0.20516962843295639,
+            "recall_oracle": 0.0
+          },
+          "Other": {
+            "n": 23,
+            "auc": 0.6456380434782609,
+            "recall": 0.0,
+            "recall_oracle": 0.0
+          }
+        },
+        "display_name": "BruteForce"
+      }
+    }
+  },
+  "adapted": {
+    "serverA": {
+      "isolation_forest": {
+        "rows": 21527,
+        "attacks": 1527,
+        "auc": 0.7429268336607727,
+        "fpr": 0.0115,
+        "recall": 0.0,
+        "recall_oracle": 0.0,
+        "families": {
+          "BruteForce": {
+            "n": 1491,
+            "auc": 0.7452150905432595,
+            "recall": 0.0,
+            "recall_oracle": 0.0
+          },
+          "Other": {
+            "n": 36,
+            "auc": 0.6481548611111111,
+            "recall": 0.0,
+            "recall_oracle": 0.0
+          }
+        }
+      },
+      "supervised": {
+        "rows": 21527,
+        "attacks": 1527,
+        "auc": 0.999027472167649,
+        "fpr": 0.00095,
+        "recall": 0.9718402095612312,
+        "recall_oracle": 0.9718402095612312,
+        "families": {
+          "BruteForce": {
+            "n": 1491,
+            "auc": 0.9999821260898727,
+            "recall": 0.994634473507713,
+            "recall_oracle": 0.994634473507713
+          },
+          "Other": {
+            "n": 36,
+            "auc": 0.9594888888888891,
+            "recall": 0.027777777777777776,
+            "recall_oracle": 0.027777777777777776
+          }
+        },
+        "display_name": "BruteForce"
+      }
+    },
+    "serverB": {
+      "isolation_forest": {
+        "rows": 21261,
+        "attacks": 1261,
+        "auc": 0.8096523592386995,
+        "fpr": 0.0252,
+        "recall": 0.0,
+        "recall_oracle": 0.0,
+        "families": {
+          "BruteForce": {
+            "n": 1238,
+            "auc": 0.8121875201938611,
+            "recall": 0.0,
+            "recall_oracle": 0.0
+          },
+          "Other": {
+            "n": 23,
+            "auc": 0.6731945652173914,
+            "recall": 0.0,
+            "recall_oracle": 0.0
+          }
+        }
+      },
+      "supervised": {
+        "rows": 21261,
+        "attacks": 1261,
+        "auc": 0.9992783901665346,
+        "fpr": 0.00095,
+        "recall": 0.9809674861221253,
+        "recall_oracle": 0.9809674861221253,
+        "families": {
+          "BruteForce": {
+            "n": 1238,
+            "auc": 0.9999748384491116,
+            "recall": 0.9975767366720517,
+            "recall_oracle": 0.9975767366720517
+          },
+          "Other": {
+            "n": 23,
+            "auc": 0.9617913043478261,
+            "recall": 0.08695652173913043,
+            "recall_oracle": 0.08695652173913043
+          }
+        },
+        "display_name": "BruteForce"
+      }
+    }
+  },
+  "external": {
+    "ddos2019": {
+      "isolation_forest": {
+        "rows": 80000,
+        "attacks": 40000,
+        "auc": 0.935890315,
+        "fpr": 0.01435,
+        "recall": 0.247225,
+        "recall_oracle": 0.28995,
+        "families": {
+          "DDoS": {
+            "n": 40000,
+            "auc": 0.935890315,
+            "recall": 0.247225,
+            "recall_oracle": 0.28995
+          }
+        }
+      },
+      "supervised": {
+        "rows": 80000,
+        "attacks": 40000,
+        "auc": 0.849019096875,
+        "fpr": 0.00105,
+        "recall": 0.028275,
+        "recall_oracle": 0.027875,
+        "families": {
+          "DDoS": {
+            "n": 40000,
+            "auc": 0.849019096875,
+            "recall": 0.028275,
+            "recall_oracle": 0.027875
+          }
+        }
+      }
+    },
+    "ddos2019 (базовая)": {
+      "isolation_forest": {
+        "rows": 80000,
+        "attacks": 40000,
+        "auc": 0.8296167178125,
+        "fpr": 0.02605,
+        "recall": 0.0,
+        "recall_oracle": 0.0,
+        "families": {
+          "DDoS": {
+            "n": 40000,
+            "auc": 0.8296167178125,
+            "recall": 0.0,
+            "recall_oracle": 0.0
+          }
+        }
+      },
+      "supervised": {
+        "rows": 80000,
+        "attacks": 40000,
+        "auc": 0.4965769128125,
+        "fpr": 0.000225,
+        "recall": 0.000575,
+        "recall_oracle": 0.000675,
+        "families": {
+          "DDoS": {
+            "n": 40000,
+            "auc": 0.4965769128125,
+            "recall": 0.000575,
+            "recall_oracle": 0.000675
+          }
+        },
+        "display_name": "BruteForce"
+      }
+    }
+  },
+  "evaluation_test": {
+    "files": [
+      "cic2017: отложенная часть",
+      "cic2018: отложенная часть",
+      "serverA: отложенная часть",
+      "serverB: отложенная часть"
+    ],
+    "isolation_forest": {
+      "adapted": {
+        "rows": 90788,
+        "attacks": 18870,
+        "auc": 0.7636292804796394,
+        "fpr": 0.019077282460580106,
+        "recall": 0.008002119766825648,
+        "recall_oracle": 0.008214096449390567,
+        "families": {
+          "Bot": {
+            "n": 1894,
+            "auc": 0.8354836053016264,
+            "recall": 0.0015839493136219642,
+            "recall_oracle": 0.0015839493136219642
+          },
+          "BruteForce": {
+            "n": 6195,
+            "auc": 0.6864280604664074,
+            "recall": 0.0,
+            "recall_oracle": 0.0
+          },
+          "DDoS": {
+            "n": 4126,
+            "auc": 0.8649684403186766,
+            "recall": 0.0,
+            "recall_oracle": 0.0
+          },
+          "DoS": {
+            "n": 4026,
+            "auc": 0.7942642357339492,
+            "recall": 0.01763537009438649,
+            "recall_oracle": 0.01763537009438649
+          },
+          "Infiltration": {
+            "n": 1599,
+            "auc": 0.5962482965407705,
+            "recall": 0.032520325203252036,
+            "recall_oracle": 0.032520325203252036
+          },
+          "Other": {
+            "n": 59,
+            "auc": 0.8387876776799943,
+            "recall": 0.0,
+            "recall_oracle": 0.0
+          },
+          "PortScan": {
+            "n": 383,
+            "auc": 0.8363774757398856,
+            "recall": 0.013054830287206266,
+            "recall_oracle": 0.02349869451697128
+          },
+          "Web": {
+            "n": 588,
+            "auc": 0.8249439956465915,
+            "recall": 0.034013605442176874,
+            "recall_oracle": 0.034013605442176874
+          }
+        }
+      }
+    },
+    "supervised": {
+      "display_name": "Атаки",
+      "adapted": {
+        "rows": 90788,
+        "attacks": 18870,
+        "auc": 0.9957771483341454,
+        "fpr": 0.0010428543619121777,
+        "recall": 0.9032856385797562,
+        "recall_oracle": 0.9029146793852676,
+        "families": {
+          "Bot": {
+            "n": 1894,
+            "auc": 0.9991619980610911,
+            "recall": 0.9646251319957762,
+            "recall_oracle": 0.9646251319957762
+          },
+          "BruteForce": {
+            "n": 6195,
+            "auc": 0.9998984876529973,
+            "recall": 0.9919289749798225,
+            "recall_oracle": 0.9914447134786117
+          },
+          "DDoS": {
+            "n": 4126,
+            "auc": 0.9998548867060142,
+            "recall": 0.9936984973339796,
+            "recall_oracle": 0.9936984973339796
+          },
+          "DoS": {
+            "n": 4026,
+            "auc": 0.9997482160334753,
+            "recall": 0.9848484848484849,
+            "recall_oracle": 0.9848484848484849
+          },
+          "Infiltration": {
+            "n": 1599,
+            "auc": 0.9535305835509523,
+            "recall": 0.04878048780487805,
+            "recall_oracle": 0.047529706066291436
+          },
+          "Other": {
+            "n": 59,
+            "auc": 0.9932797757898473,
+            "recall": 0.6271186440677966,
+            "recall_oracle": 0.6271186440677966
+          },
+          "PortScan": {
+            "n": 383,
+            "auc": 0.9999073865456141,
+            "recall": 0.9921671018276762,
+            "recall_oracle": 0.9921671018276762
+          },
+          "Web": {
+            "n": 588,
+            "auc": 0.9980949226377055,
+            "recall": 0.8724489795918368,
+            "recall_oracle": 0.8690476190476191
+          }
+        }
+      }
+    }
+  }
+}
