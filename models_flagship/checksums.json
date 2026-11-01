@@ -1,18 +1,18 @@
 {
   "algorithm": "sha256",
-  "created_at": "2026-11-01T16:27:08+00:00",
+  "created_at": "2026-11-01T16:31:29+00:00",
   "files": {
     "isolation_forest.pkl": "ffb6e0a2476a03d407160312fca5406903ea969b6602e9e29e76967bc3275528",
     "scaler.pkl": "d3ec882abcd036e9c30bec442120a96fe3a642db877cc0b55579cf9d52ea0873",
     "feature_cols_filtered.pkl": "d7b1a1221d29ac9f8e982a70c4c0125e4abb502ea67b8dab94d66d6cf5423120",
     "bruteforce.pkl": "1deb5e70265fe0d0970b20283d84f33c656647a8e1beaeb0ac22fdde22814ab8",
-    "bruteforce.json": "9b7966a7cf6a1c9b8c8295e8e173245ba5593d7d86d4dba904a097dc0d61f0a2",
-    "calibration.json": "06e9532f50bfae8b3bde22e72961201989b7a94b4415d6199654909bc5eaaa17",
-    "normal_stats.json": "fa1dfab29fc1c0126a57cd8595ee7cc9427e68ee0a433a20e7540a8e5005cc13"
+    "bruteforce.json": "cb0c2d0137c651b4e437d66dd8ce02d49cd407f86e55ff87bbd83e135d655597",
+    "calibration.json": "54a29a933afa899fb1c87c3721bb9819ff9f9a17ced908a99af646ddfd5fc999",
+    "normal_stats.json": "c9f9db4e98a6d88225509c1b5c2c5f886dff20a9012315a851020fb897143033"
   },
   "signature": {
     "algorithm": "ed25519",
     "fingerprint": "b76e22eb8a170babb91ed66dabf844c4b0116b65185a1f77b95ebed15917b3f5",
-    "value": "HJrs3l2V3MeCG3+F6E2yRZRNM5aXBwiDQmQVhZXQ/7SAMUcX67K6rZTBjJLAv1kkQfW1OjYgmv06oYxkkmLhDA=="
+    "value": "a3B6k6jZ8cIrK9SH+xaH0yRsG3zunrKtX6/oupsAPZgcYi1HOOp5Tv9TqJZG+pSCPoZrWk49I9fJ4OziPJVkBg=="
   }
 }

@@ -301,7 +301,9 @@ def evaluate_model_dir(model_dir: str, data: Dataset, rows: np.ndarray, args) ->
 
 
 def _write_json(path: str, payload: dict) -> None:
-    with open(path, "w", encoding="utf-8") as handle:
+    # LF и на Windows: git хранит JSON с LF, иначе хэши в checksums.json
+    # не совпадут после клонирования
+    with open(path, "w", encoding="utf-8", newline="\n") as handle:
         json.dump(payload, handle, ensure_ascii=False, indent=2)
 
 
