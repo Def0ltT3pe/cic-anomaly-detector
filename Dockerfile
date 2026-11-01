@@ -9,6 +9,11 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
+# tshark — разбор загруженных pcap/pcapng в потоки (pcap_to_flows.py)
+RUN apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends tshark \
+    && rm -rf /var/lib/apt/lists/*
+
 # Зависимости отдельным слоем — пересобираются только при изменении requirements.txt
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt

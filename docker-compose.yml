@@ -13,6 +13,10 @@ services:
       APP_PASSWORD: ${APP_PASSWORD:-}
       # models — рабочая модель, models_v2 — экспериментальная.
       MODEL_DIR: ${MODEL_DIR:-models}
+      # Доп. модели для выбора в интерфейсе: путь внутри контейнера (см. volumes).
+      MODELS_ROOT: ${MODELS_ROOT:-}
+      # Свои адреса и подсети через запятую: из них инциденты не собираются.
+      TRUSTED_IPS: ${TRUSTED_IPS:-}
       # 0 — отключить проверку SHA-256 моделей.
       VERIFY_MODEL_CHECKSUMS: ${VERIFY_MODEL_CHECKSUMS:-1}
     volumes:
@@ -20,6 +24,8 @@ services:
       - ./config:/app/config:ro
       # журнал аудита переживает перезапуск контейнера
       - audit_data:/app/audit
+      # адаптированные модели с хоста; MODELS_ROOT=/app/extra_models
+      # - ./extra_models:/app/extra_models:ro
     restart: unless-stopped
     security_opt:
       - no-new-privileges:true

@@ -389,6 +389,37 @@ def drop_short_flows(flows: pd.DataFrame) -> tuple[pd.DataFrame, int]:
     return flows[keep].reset_index(drop=True), int((~keep).sum())
 
 
+@dataclass
+class ConversionStats:
+    packets: int = 0
+    flows: int = 0
+    dropped: int = 0
+    warning: str = ""
+
+
+PROGRESS_EVERY = 50_000
+
+
+def convert_pcap(path: str, tshark: str, keep_short: bool = False, progress=None):
+    """Один pcap -> (потоки, ConversionStats). progress(пакетов) — по ходу чтения."""
+    if not os.path.isfile(path):
+        raise ConversionError(f"Файл не найден: {path}")
+    reader = PacketReader(path, tshark)
+
+    def packets():
+        for packet in reader:
+            if progress is not None and reader.count % PROGRESS_EVERY == 0:
+                progress(reader.count)
+            yield packet
+
+    flows = build_flows(packets())
+    stats = ConversionStats(packets=reader.count, warning=reader.warning)
+    if not keep_short:
+        flows, stats.dropped = drop_short_flows(flows)
+    stats.flows = len(flows)
+    return flows, stats
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="pcap/pcapng -> признаки потоков CICFlowMeter")
     parser.add_argument("pcap", nargs="+", help="Файлы .pcap/.pcapng")
@@ -414,16 +445,14 @@ def main() -> int:
         tshark = find_tshark(args.tshark)
         frames = []
         for path in args.pcap:
-            if not os.path.isfile(path):
-                raise ConversionError(f"Файл не найден: {path}")
-            packets = PacketReader(path, tshark)
-            flows = build_flows(packets)
-            message = f"{os.path.basename(path)}: пакетов TCP/UDP {packets.count:,}, потоков {len(flows):,}"
-            if packets.warning:
-                print(f"ВНИМАНИЕ ({os.path.basename(path)}): {packets.warning}")
+            flows, stats = convert_pcap(path, tshark, keep_short=args.keep_short)
+            name = os.path.basename(path)
+            message = (f"{name}: пакетов TCP/UDP {stats.packets:,}, "
+                       f"потоков {stats.flows + stats.dropped:,}")
+            if stats.warning:
+                print(f"ВНИМАНИЕ ({name}): {stats.warning}")
             if not args.keep_short:
-                flows, dropped = drop_short_flows(flows)
-                message += f", из них коротких (1 пакет / 0 мкс) отброшено {dropped:,}"
+                message += f", из них коротких (1 пакет / 0 мкс) отброшено {stats.dropped:,}"
             print(message)
             frames.append(flows)
     except ConversionError as exc:

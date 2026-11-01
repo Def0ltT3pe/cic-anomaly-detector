@@ -5,7 +5,9 @@ from __future__ import annotations
 import hmac
 import logging
 import os
+import shutil
 import sys
+import tempfile
 import time
 
 import numpy as np
@@ -40,6 +42,7 @@ from modules.llm_explain import (
     is_llm_configured,
     stream_gemini_explanation,
 )
+from modules.model_catalog import ModelEntry, list_models
 from modules.model_loader import (
     STATS_FILE,
     ModelLoadError,
@@ -48,10 +51,13 @@ from modules.model_loader import (
     resolve_model_dir,
 )
 from modules.pipeline import DetectionResult, FeatureValidationError, detect_anomalies
+from pcap_to_flows import ConversionError, convert_pcap, find_tshark
 
 logger = logging.getLogger(__name__)
 
 MAX_ROWS = 2_000_000
+PCAP_EXTENSIONS = (".pcap", ".pcapng", ".cap")
+TABLE_EXTENSIONS = (".parquet", ".csv")
 MAX_EXPLANATIONS = 5
 
 st.set_page_config(
@@ -61,27 +67,27 @@ st.set_page_config(
 )
 
 
-@st.cache_resource(show_spinner="Загружаем модель…")
-def _load_assets():
-    model, scaler, selector, feature_cols = load_model_objects()
-    means, stds = load_normal_stats(feature_cols=feature_cols)
+@st.cache_resource(show_spinner="Загружаем модель…", max_entries=4)
+def _load_assets(model_dir: str):
+    model, scaler, selector, feature_cols = load_model_objects(model_dir)
+    means, stds = load_normal_stats(feature_cols=feature_cols, model_dir=model_dir)
     errors = []
     try:
-        calibration = load_calibration()
+        calibration = load_calibration(model_dir)
     except CalibrationError as exc:
         logger.warning("Калибровка не загружена: %s", exc)
         calibration = None
         errors.append(f"Калибровка не загружена: {exc}")
 
     try:
-        brute = load_bruteforce()
+        brute = load_bruteforce(model_dir)
     except BruteForceError as exc:
         logger.warning("BruteForce-модель не загружена: %s", exc)
         brute = None
         errors.append(f"BruteForce-модель не загружена: {exc}")
 
     try:
-        unprotected = verify_if_listed(resolve_model_dir(), [CALIBRATION_FILE, STATS_FILE])
+        unprotected = verify_if_listed(model_dir, [CALIBRATION_FILE, STATS_FILE])
     except IntegrityError:
         unprotected = []  # несовпадение хэша уже обработано загрузчиками выше
     if unprotected:
@@ -184,6 +190,8 @@ def _init_state() -> None:
         "df": None,
         "file_id": None,
         "brute": None,
+        "flows_parquet": None,
+        "model_dir": None,
         "user": None,
         "role": None,
         "auth_mode": None,
@@ -251,7 +259,7 @@ def _render_identity() -> None:
         _render_audit_panel()
 
 
-def _read_uploaded(file) -> pd.DataFrame:
+def _read_table(file) -> pd.DataFrame:
     name = (getattr(file, "name", "") or "").lower()
 
     if name.endswith(".parquet"):
@@ -265,13 +273,56 @@ def _read_uploaded(file) -> pd.DataFrame:
             file.seek(0)
             df = pd.read_csv(file, encoding="cp1252")
     else:
-        raise ValueError("Поддерживаются только файлы .csv и .parquet.")
+        raise ValueError("Поддерживаются файлы .pcap, .pcapng, .cap, .csv и .parquet.")
+    return df
 
-    if df is None or df.empty:
-        raise ValueError("Файл пуст: нет ни одной строки данных.")
+
+def _convert_pcap_upload(file, tshark: str) -> pd.DataFrame:
+    """pcap из загрузки -> потоки; временная копия удаляется сразу после."""
+    suffix = os.path.splitext(file.name)[1].lower()
+    with st.status(f"{file.name}: считаем потоки…") as status, tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "capture" + suffix)
+        file.seek(0)
+        with open(path, "wb") as handle:
+            shutil.copyfileobj(file, handle, 1 << 20)
+        flows, stats = convert_pcap(
+            path,
+            tshark,
+            progress=lambda count: status.update(
+                label=f"{file.name}: прочитано пакетов {count:,}…"
+            ),
+        )
+        status.update(
+            label=(
+                f"{file.name}: пакетов {stats.packets:,}, потоков {stats.flows:,} "
+                f"(коротких отброшено {stats.dropped:,})"
+            ),
+            state="complete",
+        )
+        if stats.warning:
+            st.warning(f"{file.name}: файл обрезан, прочитано сколько удалось — {stats.warning}")
+    return flows
+
+
+def _load_uploads(files) -> tuple[pd.DataFrame, bool]:
+    """Все загруженные файлы в одну таблицу; True — если были pcap."""
+    frames = []
+    tshark = None
+    for file in files:
+        name = (file.name or "").lower()
+        if name.endswith(PCAP_EXTENSIONS):
+            if tshark is None:
+                tshark = find_tshark(os.environ.get("TSHARK") or None)
+            frame = _convert_pcap_upload(file, tshark)
+        else:
+            frame = _read_table(file)
+        if frame is None or frame.empty:
+            raise ValueError(f"{file.name}: нет ни одной строки данных.")
+        frames.append(frame)
+    df = pd.concat(frames, ignore_index=True) if len(frames) > 1 else frames[0]
     if len(df) > MAX_ROWS:
         raise ValueError(f"Слишком много строк: {len(df):,}. Максимум — {MAX_ROWS:,}.")
-    return df
+    return df, tshark is not None
 
 
 def _true_label(result: DetectionResult, index: int) -> str:
@@ -478,6 +529,85 @@ def _render_analysis(
                 st.code(explain_anomaly(result.X.iloc[int(index)], means, stds))
 
 
+def _reset_analysis() -> None:
+    st.session_state.analysis = None
+    st.session_state.explanations = {}
+    st.session_state.brute = None
+
+
+def _select_model(user, role) -> ModelEntry | None:
+    """Выбор модели в боковой панели; действует только в этой сессии."""
+    try:
+        entries = list_models()
+    except OSError as exc:
+        st.sidebar.warning(f"Не удалось прочитать список моделей: {exc}")
+        entries = []
+    if not entries:
+        return None
+
+    paths = [entry.path for entry in entries]
+    current = st.session_state.model_dir
+    index = paths.index(current) if current in paths else 0
+    entry = st.sidebar.selectbox(
+        "Модель",
+        entries,
+        index=index,
+        format_func=lambda item: item.label,
+        help="Подписанные модели из папок models* и MODELS_ROOT",
+    )
+    if current is not None and current != entry.path:
+        _reset_analysis()  # тревоги прежней модели к новой не относятся
+        log_event(user, role, "model_select", model=entry.name)
+    st.session_state.model_dir = entry.path
+    return entry
+
+
+def _percent(value, digits: int = 1) -> str:
+    return "—" if value is None else f"{float(value):.{digits}%}"
+
+
+def _evaluation_rows(metadata: dict) -> tuple[str, list[dict]]:
+    evaluation = metadata.get("evaluation_test") or metadata.get("evaluation") or {}
+    title = "отложенные файлы" if metadata.get("evaluation_test") else "отложенная часть"
+    rows = []
+    for key, name in (("isolation_forest", "IsolationForest"), ("supervised", None)):
+        block = evaluation.get(key)
+        if not isinstance(block, dict) or not isinstance(block.get("adapted"), dict):
+            continue
+        stats = block["adapted"]
+        rows.append({
+            "Модель": name or block.get("display_name", "Supervised"),
+            "Полнота": _percent(stats.get("recall")),
+            "FPR": _percent(stats.get("fpr"), digits=3),
+            "AUC": f"{stats['auc']:.3f}" if stats.get("auc") is not None else "—",
+        })
+    return title, rows
+
+
+def _render_model_card(entry: ModelEntry) -> None:
+    metadata = entry.metadata
+    with st.sidebar.expander("О модели"):
+        st.caption(f"`{entry.name}`")
+        if not metadata:
+            st.caption("metadata.json нет.")
+            return
+        facts = {
+            "Версия": metadata.get("version"),
+            "Создана": str(metadata.get("created_at", ""))[:16].replace("T", " "),
+            "База": metadata.get("base_model"),
+            "Целевой FPR": (
+                f"{float(metadata['target_fpr']):.2%}" if metadata.get("target_fpr") else None
+            ),
+        }
+        st.markdown("\n".join(f"- {key}: {value}" for key, value in facts.items() if value))
+        if metadata.get("note"):
+            st.caption(metadata["note"])
+        title, rows = _evaluation_rows(metadata)
+        if rows:
+            st.caption(f"Проверка ({title}):")
+            st.dataframe(pd.DataFrame(rows), hide_index=True)
+
+
 def main() -> None:
     _init_state()
     _login_screen()
@@ -486,8 +616,12 @@ def main() -> None:
     user = st.session_state.get("user")
     role = st.session_state.get("role")
 
+    entry = _select_model(user, role)
+    model_dir = entry.path if entry is not None else resolve_model_dir()
     try:
-        model, scaler, selector, feature_cols, means, stds, calibration, brute, load_errors = _load_assets()
+        model, scaler, selector, feature_cols, means, stds, calibration, brute, load_errors = (
+            _load_assets(model_dir)
+        )
     except ModelLoadError as exc:
         log_event(user, role, "model_error", message=str(exc))
         st.sidebar.error(f"❌ {exc}")
@@ -499,6 +633,8 @@ def main() -> None:
         st.stop()
 
     st.sidebar.success("✅ Модель и статистики загружены")
+    if entry is not None:
+        _render_model_card(entry)
     for message in load_errors:
         st.sidebar.warning(f"⚠️ {message}")
         log_event(user, role, "model_warning", message=message)
@@ -521,47 +657,66 @@ def main() -> None:
 
     st.title("Анализатор аномалий сетевого трафика")
     st.caption(
-        "Загрузите CSV или Parquet с теми же признаками, что использовались при обучении."
+        "Загрузите захват pcap/pcapng (потоки посчитает tshark) или CSV/Parquet "
+        "с теми же признаками, что использовались при обучении."
     )
 
-    uploaded = st.file_uploader("📂 Загрузите файл (Parquet или CSV)", type=["parquet", "csv"])
-    if uploaded is None:
+    uploaded = st.file_uploader(
+        "📂 Загрузите файлы (pcap, pcapng, Parquet или CSV)",
+        type=list(PCAP_EXTENSIONS + TABLE_EXTENSIONS),
+        accept_multiple_files=True,
+    )
+    if not uploaded:
         st.info("Файл не загружен.")
         return
 
-    file_id = getattr(uploaded, "file_id", None) or f"{uploaded.name}:{uploaded.size}"
+    file_id = tuple(
+        getattr(item, "file_id", None) or f"{item.name}:{item.size}" for item in uploaded
+    )
+    names = ", ".join(item.name for item in uploaded)
     if st.session_state.file_id != file_id:
+        st.session_state.file_id = None
+        st.session_state.df = None
+        st.session_state.flows_parquet = None
+        _reset_analysis()
         try:
-            df = _read_uploaded(uploaded)
+            df, converted = _load_uploads(uploaded)
+        except ConversionError as exc:
+            log_event(user, role, "upload_error", file=names, error=str(exc))
+            st.error(f"Не удалось разобрать захват: {exc} (путь к tshark можно задать в TSHARK)")
+            return
         except Exception as exc:
-            st.session_state.file_id = None
-            st.session_state.df = None
-            st.session_state.analysis = None
-            st.session_state.explanations = {}
-            st.session_state.brute = None
-            log_event(user, role, "upload_error", file=uploaded.name, error=str(exc))
+            log_event(user, role, "upload_error", file=names, error=str(exc))
             st.error(f"Не удалось прочитать файл: {exc}")
             return
 
         st.session_state.file_id = file_id
         st.session_state.df = df
-        st.session_state.analysis = None
-        st.session_state.explanations = {}
-        st.session_state.brute = None
+        if converted:
+            st.session_state.flows_parquet = df.to_parquet(index=False)
         log_event(
             user,
             role,
             "upload",
-            file=uploaded.name,
+            file=names,
             rows=len(df),
             columns=len(df.columns),
+            pcap=converted,
         )
 
     df = st.session_state.df
     if df is None:
         return
 
-    st.caption(f"Файл: `{uploaded.name}` — {len(df):,} записей, {len(df.columns)} колонок")
+    st.caption(f"Файлы: `{names}` — {len(df):,} записей, {len(df.columns)} колонок")
+    if st.session_state.flows_parquet is not None:
+        st.download_button(
+            "Скачать потоки (Parquet)",
+            st.session_state.flows_parquet,
+            file_name="flows.parquet",
+            mime="application/octet-stream",
+            help="Потоки из pcap: в следующий раз можно загрузить их без конвертации",
+        )
 
     if st.button("Анализировать", type="primary"):
         try:

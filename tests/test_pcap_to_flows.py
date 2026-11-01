@@ -5,7 +5,14 @@ import numpy as np
 import pandas as pd
 
 from modules.model_loader import load_model_objects
-from pcap_to_flows import FLOW_TIMEOUT_US, META_COLUMNS, build_flows, drop_short_flows
+from pcap_to_flows import (
+    FLOW_TIMEOUT_US,
+    META_COLUMNS,
+    ConversionError,
+    build_flows,
+    convert_pcap,
+    drop_short_flows,
+)
 
 COLUMNS = [
     "frame_time_epoch", "ip_src", "ip_dst", "ipv6_src", "ipv6_dst", "ip_proto", "ipv6_nxt",
@@ -123,3 +130,51 @@ class BuildFlowsTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FakeReader:
+    """PacketReader без tshark: отдаёт заранее заданные пакеты."""
+
+    rows: list = []
+
+    def __init__(self, pcap, tshark):
+        self.count = 0
+        self.warning = "обрезан"
+
+    def __iter__(self):
+        for row in self.rows:
+            self.count += 1
+            yield {**dict.fromkeys(COLUMNS, ""), **row}
+
+
+class ConvertPcapTests(unittest.TestCase):
+    def setUp(self):
+        c, s = "10.0.0.2", "93.184.216.34"
+        FakeReader.rows = [
+            tcp(0.0, c, s, 50000, 443, "0x0002"),
+            tcp(0.01, s, c, 443, 50000, "0x0012"),
+            tcp(0.02, c, s, 50000, 443, "0x0011"),
+            udp(1.0, c, "8.8.8.8", 53000, 53, 40),  # один пакет — отбрасывается
+        ]
+
+    def run_convert(self, **kwargs):
+        with patch("pcap_to_flows.PacketReader", FakeReader), \
+                patch("pcap_to_flows.os.path.isfile", return_value=True), \
+                patch("pcap_to_flows.PROGRESS_EVERY", 2):
+            return convert_pcap("capture.pcapng", "tshark", **kwargs)
+
+    def test_stats_and_progress(self):
+        seen = []
+        flows, stats = self.run_convert(progress=seen.append)
+        self.assertEqual((stats.packets, stats.flows, stats.dropped), (4, 1, 1))
+        self.assertEqual(len(flows), 1)
+        self.assertEqual(stats.warning, "обрезан")
+        self.assertEqual(seen, [2, 4])
+
+    def test_keep_short(self):
+        flows, stats = self.run_convert(keep_short=True)
+        self.assertEqual((stats.flows, stats.dropped), (2, 0))
+
+    def test_missing_file(self):
+        with self.assertRaises(ConversionError):
+            convert_pcap("нет-такого.pcapng", "tshark")
