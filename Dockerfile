@@ -5,9 +5,15 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
     STREAMLIT_SERVER_HEADLESS=true \
-    STREAMLIT_BROWSER_GATHER_USAGE_STATS=false
+    STREAMLIT_BROWSER_GATHER_USAGE_STATS=false \
+    ALLOW_OPEN_MODE=0
 
 WORKDIR /app
+
+# tshark — разбор загруженных pcap/pcapng в потоки (pcap_to_flows.py)
+RUN apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends tshark \
+    && rm -rf /var/lib/apt/lists/*
 
 # Зависимости отдельным слоем — пересобираются только при изменении requirements.txt
 COPY requirements.txt ./
@@ -16,10 +22,12 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Код, модели и normal_stats.json
 COPY . .
 
-# Запуск не от root; audit/ должен быть записываемым
+# Запуск не от root. Код и модели остаются за root: процесс приложения не
+# может их переписать (подменённый .pkl исполнил бы код). Запись — только в audit/
 RUN useradd --create-home --uid 1000 appuser \
     && mkdir -p /app/audit \
-    && chown -R appuser:appuser /app
+    && chown appuser:appuser /app/audit \
+    && chmod -R a+rX,go-w /app
 USER appuser
 
 EXPOSE 8501

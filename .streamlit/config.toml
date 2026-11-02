@@ -1,6 +1,52 @@
 [server]
 headless = true
-maxUploadSize = 200
+maxUploadSize = 500
 
 [browser]
 gatherUsageStats = false
+
+[client]
+# Без меню Deploy и пунктов разработчика
+toolbarMode = "minimal"
+
+# Оформление нейтральное, сталь и графит: цветом говорят только данные
+# (синий/оранжевый на графиках) и вердикты (красный/жёлтый/зелёный).
+[theme]
+font = "Golos Text:https://fonts.googleapis.com/css2?family=Golos+Text:wght@400;500;600;700&display=swap, sans-serif"
+codeFont = "JetBrains Mono:https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&display=swap, monospace"
+baseFontSize = 15
+headingFontSizes = ["2.1rem", "1.6rem", "1.3rem", "1.1rem", "1rem", "0.9rem"]
+headingFontWeights = [700, 600, 600, 600, 600, 600]
+metricValueFontSize = "1.9rem"
+metricValueFontWeight = 600
+baseRadius = "6px"
+buttonRadius = "6px"
+showWidgetBorder = true
+
+[theme.light]
+primaryColor = "#2F4A66"
+backgroundColor = "#F4F6F8"
+secondaryBackgroundColor = "#E8ECF0"
+textColor = "#17212C"
+borderColor = "#D0D8E0"
+linkColor = "#2F4A66"
+codeBackgroundColor = "#E8ECF0"
+
+[theme.light.sidebar]
+backgroundColor = "#EAEEF2"
+secondaryBackgroundColor = "#DEE4EA"
+borderColor = "#CBD3DC"
+
+[theme.dark]
+primaryColor = "#5D7FA3"
+backgroundColor = "#141B23"
+secondaryBackgroundColor = "#1D2631"
+textColor = "#DCE3EA"
+borderColor = "#2E3A47"
+linkColor = "#9DB7D3"
+codeBackgroundColor = "#1D2631"
+
+[theme.dark.sidebar]
+backgroundColor = "#18202A"
+secondaryBackgroundColor = "#222C38"
+borderColor = "#323F4D"

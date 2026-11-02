@@ -10,6 +10,8 @@ from dataclasses import dataclass, field
 
 import numpy as np
 import pandas as pd
+from sklearn.pipeline import make_pipeline
+from sklearn.preprocessing import FunctionTransformer, StandardScaler
 
 
 class FeatureValidationError(ValueError):
@@ -197,3 +199,20 @@ def signed_log1p(X):
     внутри scaler.pkl, и detect_anomalies применит её без изменений кода.
     """
     return np.sign(X) * np.log1p(np.abs(X))
+
+
+def make_scaler(log1p: bool = False):
+    """StandardScaler, при log1p — после signed_log1p (одинаково для всех моделей)."""
+    if not log1p:
+        return StandardScaler()
+    return make_pipeline(
+        FunctionTransformer(signed_log1p, feature_names_out="one-to-one"), StandardScaler()
+    )
+
+
+def if_scores(model, scaler, selector, X: pd.DataFrame) -> np.ndarray:
+    """decision_function IsolationForest: меньше — аномальнее (как в detect_anomalies)."""
+    scaled = scaler.transform(X)
+    if selector is not None:
+        scaled = selector.transform(scaled)
+    return np.asarray(model.decision_function(scaled), dtype=float)
