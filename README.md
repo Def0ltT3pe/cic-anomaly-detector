@@ -1,6 +1,6 @@
 # Детектор аномалий сетевого трафика
 
-**Версия 1.0.0** · Python 3.12 · MIT
+**Версия 2.0.0** · Python 3.12 · MIT
 
 Поиск аномалий в сетевом трафике (CIC-IDS2017): IsolationForest для общих
 аномалий и отдельный supervised-детектор для BruteForce. Есть веб-интерфейс
@@ -77,12 +77,13 @@ python manage_users.py remove alice
 | `viewer` | да | нет | нет |
 
 Если `users.json` нет, но задан `APP_PASSWORD` — вход по общему паролю
-(роль `admin`). Если нет ни того, ни другого — приложение работает в
-открытом режиме `anonymous/admin` и показывает предупреждение. Для
+(роль `admin`). Если нет ни того, ни другого — при локальном запуске
+приложение работает в открытом режиме `anonymous/admin` и показывает
+предупреждение, а в Docker не открывается (`ALLOW_OPEN_MODE=0`). Для
 production задайте пользователей или `APP_PASSWORD`.
 
-После 5 неудачных попыток вход блокируется на 60 секунд в рамках сессии;
-все попытки пишутся в аудит.
+После 5 неудачных попыток подряд логин блокируется на 60 секунд для всех
+сессий (перезагрузка страницы не помогает); все попытки пишутся в аудит.
 
 ## Аудит
 
@@ -103,16 +104,22 @@ production задайте пользователей или `APP_PASSWORD`.
 ## Быстрый старт (Docker, Linux)
 
 ```bash
-cp .env.example .env      # при желании впишите GEMINI_API_KEY и APP_PASSWORD
+cp .env.example .env      # впишите APP_PASSWORD (или создайте users.json), при желании GEMINI_API_KEY
 docker compose up --build -d
 ```
 
-Откройте `http://<host>:8501`.
+Откройте `http://127.0.0.1:8501`. По умолчанию порт опубликован только на
+этой машине; для доступа по сети задайте `APP_BIND=0.0.0.0` и поставьте
+reverse proxy с TLS.
 
 Пользователи читаются из `./config/users.json` (создайте заранее командой
 `python manage_users.py add ...`), аудит лежит в named volume `audit_data`.
-Если `users.json` нет и `APP_PASSWORD` пуст — приложение откроется в
-режиме `anonymous/admin` с предупреждением.
+Если `users.json` нет и `APP_PASSWORD` пуст — приложение покажет, как
+настроить вход, и дальше не пустит. Открытый режим `anonymous/admin` без
+пароля — только явно: `ALLOW_OPEN_MODE=1`.
+
+Код и модели в образе принадлежат root и процессу приложения доступны
+только на чтение; записывать он может лишь в `audit/`.
 
 ```bash
 docker compose ps
@@ -125,9 +132,9 @@ docker inspect --format '{{.State.Health.Status}}' cic_anomaly_detector
 
 ```bash
 docker build -t cic-anomaly-detector .
-docker run -d --name cic_anomaly_detector -p 8501:8501 \
+docker run -d --name cic_anomaly_detector -p 127.0.0.1:8501:8501 \
   -v "$PWD/config:/app/config:ro" -v cic_audit:/app/audit \
-  -e GEMINI_API_KEY= -e APP_PASSWORD= cic-anomaly-detector
+  -e GEMINI_API_KEY= -e APP_PASSWORD=<пароль> cic-anomaly-detector
 ```
 
 ## Локальный запуск
@@ -157,6 +164,7 @@ streamlit run App.py
 | `LLM_CONFIG` | `config/llm.json` | Свои варианты LLM (образец — `config/llm.example.json`) |
 | `LLM_PROVIDER` | первый настроенный | id варианта LLM по умолчанию (`gemini`, `claude`, `openai`…) |
 | `APP_PASSWORD` | пусто | Общий пароль, если нет `users.json` |
+| `ALLOW_OPEN_MODE` | `1` локально, `0` в Docker | `0` — без пользователей и пароля не пускать; `1` — открытый режим `anonymous/admin` |
 | `USERS_FILE` | `config/users.json` | Файл пользователей |
 | `AUDIT_LOG` | `audit/audit.jsonl` | Журнал аудита |
 | `AUDIT_ENABLED` | `1` | `0` — не писать аудит |
@@ -168,7 +176,7 @@ streamlit run App.py
 | `MODEL_PUBLIC_KEY` | `trust/model_public_key.pem` | Публичный ключ Ed25519 |
 | `MODEL_PRIVATE_KEY` | `keys/model_signing_key.pem` | Приватный ключ (только подпись) |
 | `ALLOW_UNSIGNED_MODELS` | `0` | `1` — разрешить неподписанные checksums |
-| `APP_BIND` | `0.0.0.0` | Адрес публикации порта (`127.0.0.1` — только локально) |
+| `APP_BIND` | `127.0.0.1` | Адрес публикации порта (`0.0.0.0` — доступ по сети) |
 | `APP_PORT` | `8501` | Внешний порт |
 
 Для локального Streamlit ключ можно положить в `.streamlit/secrets.toml`
@@ -680,12 +688,15 @@ Fable 5.1 / Sonnet 5.5). Таймаут ожидания — 120 с на каж�
 - Ключей в репозитории быть не должно. Если ключ попал в git — **отзовите его**,
   удаление файла не помогает: ключ остаётся в истории.
 - Пользователи и роли — в `config/users.json` (PBKDF2, 600k итераций).
-  Без пользователей и `APP_PASSWORD` приложение открыто; для публичного
-  сервера задайте пользователей, пароль и reverse proxy с TLS.
+  Без пользователей и `APP_PASSWORD` приложение открыто только при локальном
+  запуске; в Docker оно не пускает без входа (`ALLOW_OPEN_MODE=0`) и
+  публикуется на `127.0.0.1`. Для публичного сервера задайте пользователей,
+  пароль и reverse proxy с TLS.
 - Аудит пишется в `audit/audit.jsonl`; админ видит последние события.
-  Блокировка после 5 неудачных попыток действует в рамках сессии.
+  Блокировка после 5 неудачных попыток действует для логина во всех сессиях.
 - Модели — pickle-файлы: подменённый `.pkl` может выполнить код. Держите
-  `models/` только на чтение и не отключайте подпись без причины.
+  `models/` только на чтение и не отключайте подпись без причины. При
+  публичном ключе папка без `checksums.json` не загружается.
 - Данные трафика при включённом `--use_llm` уходят в Google. Для
   конфиденциального трафика LLM лучше отключить.
 

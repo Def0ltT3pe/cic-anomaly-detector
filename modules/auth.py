@@ -14,6 +14,8 @@ import json
 import os
 import re
 import secrets
+import threading
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
@@ -179,6 +181,53 @@ def authenticate(username: str, password: str, path: str | None = None) -> User 
     if role not in ROLES:
         role = DEFAULT_ROLE
     return User(username=username, role=role)
+
+
+class LoginThrottle:
+    """Блокировка логина после серии неудач — общая для всех сессий процесса.
+
+    Счётчик в st.session_state сбрасывался перезагрузкой страницы, поэтому
+    он хранится здесь, по логину (без учёта регистра и пробелов).
+    """
+
+    MAX_TRACKED = 10_000
+
+    def __init__(self, max_attempts: int = 5, lock_seconds: float = 60, clock=time.monotonic):
+        self.max_attempts = max_attempts
+        self.lock_seconds = lock_seconds
+        self._clock = clock
+        self._lock = threading.Lock()
+        self._state: dict[str, tuple[int, float]] = {}  # логин -> (неудач подряд, блок до)
+
+    @staticmethod
+    def _key(username: str) -> str:
+        return (username or "").strip().lower()
+
+    def locked_for(self, username: str) -> float:
+        """Сколько секунд логин ещё заблокирован (0 — можно пробовать)."""
+        with self._lock:
+            _, until = self._state.get(self._key(username), (0, 0.0))
+        return max(0.0, until - self._clock())
+
+    def failed(self, username: str) -> int:
+        """Учесть неудачу; номер попытки в серии. На max_attempts — блокировка."""
+        key = self._key(username)
+        with self._lock:
+            now = self._clock()
+            if len(self._state) >= self.MAX_TRACKED:
+                # Перебор множества логинов не должен раздувать память
+                self._state = {k: v for k, v in self._state.items() if v[1] > now}
+            attempts = self._state.get(key, (0, 0.0))[0] + 1
+            until = now + self.lock_seconds if attempts >= self.max_attempts else 0.0
+            self._state[key] = (0 if until else attempts, until)
+        return attempts
+
+    def succeeded(self, username: str) -> None:
+        with self._lock:
+            self._state.pop(self._key(username), None)
+
+
+LOGIN_THROTTLE = LoginThrottle()
 
 
 def can_use_llm(role: str | None) -> bool:
