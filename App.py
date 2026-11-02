@@ -354,9 +354,13 @@ def _convert_pcap_upload(file, tshark: str) -> pd.DataFrame:
     return flows
 
 
-def _load_uploads(files) -> tuple[pd.DataFrame, bool]:
-    """Все загруженные файлы в одну таблицу; True — если были pcap."""
+def _load_uploads(files) -> tuple[pd.DataFrame, pd.DataFrame | None]:
+    """Все загруженные файлы в одну таблицу и отдельно потоки из pcap (None — pcap не было).
+
+    Потоки из pcap отдаются отдельно для выгрузки в Parquet: у CSV время бывает
+    текстом, и смешанная колонка Timestamp в Parquet не записывается."""
     frames = []
+    pcap_frames = []
     tshark = None
     for file in files:
         name = (file.name or "").lower()
@@ -364,6 +368,7 @@ def _load_uploads(files) -> tuple[pd.DataFrame, bool]:
             if tshark is None:
                 tshark = find_tshark(os.environ.get("TSHARK") or None)
             frame = _convert_pcap_upload(file, tshark)
+            pcap_frames.append(frame)
         else:
             frame = _read_table(file)
         if frame is None or frame.empty:
@@ -372,7 +377,11 @@ def _load_uploads(files) -> tuple[pd.DataFrame, bool]:
     df = pd.concat(frames, ignore_index=True) if len(frames) > 1 else frames[0]
     if len(df) > MAX_ROWS:
         raise ValueError(f"Слишком много строк: {len(df):,}. Максимум — {MAX_ROWS:,}.")
-    return df, tshark is not None
+    if not pcap_frames:
+        return df, None
+    if len(pcap_frames) == len(frames):
+        return df, df
+    return df, pd.concat(pcap_frames, ignore_index=True)
 
 
 def _flow_title(result: DetectionResult, index: int, brute, brute_probs) -> str:
@@ -967,7 +976,7 @@ def _handle_upload(user, role) -> tuple[pd.DataFrame, str] | None:
         st.session_state.flows_parquet = None
         _reset_analysis()
         try:
-            df, converted = _load_uploads(uploaded)
+            df, pcap_flows = _load_uploads(uploaded)
         except ConversionError as exc:
             log_event(user, role, "upload_error", file=names, error=str(exc))
             st.error(f"Не удалось разобрать захват: {exc} (путь к tshark можно задать в TSHARK)")
@@ -979,8 +988,8 @@ def _handle_upload(user, role) -> tuple[pd.DataFrame, str] | None:
 
         st.session_state.file_id = file_id
         st.session_state.df = df
-        if converted:
-            st.session_state.flows_parquet = df.to_parquet(index=False)
+        if pcap_flows is not None:
+            st.session_state.flows_parquet = pcap_flows.to_parquet(index=False)
         log_event(
             user,
             role,
@@ -988,7 +997,7 @@ def _handle_upload(user, role) -> tuple[pd.DataFrame, str] | None:
             file=names,
             rows=len(df),
             columns=len(df.columns),
-            pcap=converted,
+            pcap=pcap_flows is not None,
         )
 
     df = st.session_state.df
