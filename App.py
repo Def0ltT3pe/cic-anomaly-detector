@@ -54,7 +54,21 @@ from modules.llm_explain import (
     providers,
     stream_chat,
 )
+from modules.charts import deviation_chart, timeline_chart, top_chart
+from modules.explainer import feature_deviations
 from modules.model_catalog import ModelEntry, list_models
+from modules.overview import (
+    ANOMALY,
+    ATTACK,
+    SUSPICIOUS,
+    alert_timeline,
+    flow_table,
+    incident_peers,
+    llm_verdict,
+    model_verdict,
+    top_peers,
+    top_ports,
+)
 from modules.model_loader import (
     STATS_FILE,
     ModelLoadError,
@@ -68,6 +82,9 @@ from pcap_to_flows import ConversionError, convert_pcap, find_tshark
 logger = logging.getLogger(__name__)
 
 MAX_ROWS = 2_000_000
+VIEWS = ("Обзор", "Инциденты", "Потоки", "Разбор потока")
+TABLE_LIMIT = 1000
+TOP_FEATURES_CHART = 10
 PCAP_EXTENSIONS = (".pcap", ".pcapng", ".cap")
 TABLE_EXTENSIONS = (".parquet", ".csv")
 
@@ -402,8 +419,17 @@ def _render_flow_review(
     provider: str | None,
 ) -> None:
     """Любой поток: факты моделей, вопрос к ИИ, уточнения в чате, отчёт в Markdown."""
-    st.subheader("Разбор потока")
     candidates = flagged_candidates(result, brute_probs, brute_mask)
+    target = st.session_state.pop("goto_flow", None)
+    if target is None and "flow_mode" not in st.session_state:
+        # Streamlit забывает виджеты скрытой вкладки — возвращаем прежний поток
+        target = st.session_state.get("review_flow")
+    if target is not None:
+        # Поток выбран кликом в таблице: ставим его в виджеты до их создания
+        if target in candidates:
+            st.session_state.flow_mode, st.session_state.flow_pick = "Из тревог", target
+        else:
+            st.session_state.flow_mode, st.session_state.flow_row = "По номеру строки", target
     modes = (["Из тревог"] if candidates else []) + ["По номеру строки"]
     mode = st.radio("Какой поток разобрать", modes, horizontal=True, key="flow_mode")
     if mode == "Из тревог":
@@ -421,15 +447,36 @@ def _render_flow_review(
             )
         )
     index = int(index)
+    st.session_state.review_flow = index
 
     report_kwargs = dict(
         brute=brute, brute_probs=brute_probs, brute_mask=brute_mask, incidents=incidents
     )
     report = build_flow_report(result, index, means, stds, mask_ips=False, **report_kwargs)
-    with st.expander("Факты о потоке", expanded=True):
-        st.markdown(report)
+    in_incident = incidents is not None and bool(len(incidents)) and bool(
+        incidents["rows"].apply(lambda rows: index in rows).any()
+    )
+    level, text = model_verdict(
+        bool(result.mask[index]),
+        bool(brute_mask[index]) if brute_mask is not None else None,
+        in_incident,
+    )
+    _verdict_box(level, f"По моделям — {text}")
 
     chat = st.session_state.explanations.setdefault(index, [])
+    answers = [m["shown"] for m in chat if m["role"] == "assistant"]
+    ai_level = llm_verdict(answers[0]) if answers else None
+    if ai_level is not None:
+        _verdict_box(ai_level, "По оценке ИИ — " + VERDICT_WORDS[ai_level])
+
+    facts, chart = st.columns([3, 2])
+    with facts.expander("Факты о потоке", expanded=True):
+        st.markdown(report)
+    deviations = feature_deviations(result.X.iloc[index], means, stds, TOP_FEATURES_CHART)
+    if not deviations.empty:
+        chart.caption("Чем поток отличается от нормы (наведите на столбец)")
+        chart.altair_chart(deviation_chart(deviations, _theme()), width="stretch")
+
     for message in chat:
         with st.chat_message(message["role"]):
             st.markdown(message["shown"])
@@ -507,40 +554,188 @@ def _compute_incidents(result: DetectionResult, brute_probs, brute_mask):
         return None
 
 
-def _render_incidents(brute, brute_mask, incidents) -> None:
+VERDICT_WORDS = {
+    ATTACK: "атака",
+    SUSPICIOUS: "подозрительно",
+    ANOMALY: "необычный поток",
+    "normal": "вероятно, ложное срабатывание или норма",
+}
+
+
+def _verdict_box(level: str, text: str) -> None:
+    """Плашка вердикта: цвет и значок по уровню, текст всегда рядом (не только цвет)."""
+    if level == ATTACK:
+        st.error(text, icon="🚨")
+    elif level == SUSPICIOUS:
+        st.warning(text, icon="⚠️")
+    elif level == ANOMALY:
+        st.info(text, icon="🔎")
+    else:
+        st.success(text, icon="✅")
+
+
+def _theme() -> str | None:
+    try:
+        return st.context.theme.type
+    except AttributeError:  # старый Streamlit без st.context.theme
+        return None
+
+
+def _goto_flow(index: int) -> None:
+    """Открыть поток во вкладке «Разбор потока» (виджеты обновятся при перезапуске)."""
+    st.session_state.goto_flow = int(index)
+    st.session_state.goto_view = "Разбор потока"
+    st.rerun()
+
+
+def _jump_on_select(event, table: pd.DataFrame, key: str, column: str = "#") -> None:
+    """Клик по строке таблицы -> разбор потока. Повторно та же строка не срабатывает:
+    при возврате на вкладку Streamlit восстанавливает прежний выбор."""
+    rows = event.selection.rows if event is not None else []
+    if not rows:
+        st.session_state.pop(key, None)
+        return
+    index = int(table.iloc[rows[0]][column])
+    if st.session_state.get(key) != index:
+        st.session_state[key] = index
+        _goto_flow(index)
+
+
+def _render_overview(result: DetectionResult, brute, brute_probs, brute_mask, incidents) -> None:
+    cols = st.columns(5)
+    cols[0].metric("Потоков", f"{result.total:,}")
+    cols[1].metric("Аномалий IF", f"{result.n_anomalies:,}",
+                   help=f"IsolationForest: {result.share:.2%} потоков")
+    if brute_mask is not None:
+        cols[2].metric("Тревог", f"{int(brute_mask.sum()):,}",
+                       help=f"{brute.display_name}: порог {brute.threshold:.3f}, FPR ≈ "
+                            f"{float(brute.metadata.get('target_fpr', 0)):.2%}")
+        cols[3].metric("Инцидентов", "—" if incidents is None else f"{len(incidents):,}")
+        cols[4].metric("Адресов", "—" if incidents is None else f"{incident_peers(incidents):,}",
+                       help="Внешние адреса, от которых есть инциденты")
+    else:
+        cols[2].metric("Классификатор атак", "нет модели")
+
+    if result.info.get("inf_replaced") or result.info.get("nan_filled"):
+        st.caption(
+            f"В данных найдено inf: {result.info.get('inf_replaced', 0)}, "
+            f"пропусков: {result.info.get('nan_filled', 0)} — заменены средними нормы."
+        )
+
+    masks = {"IsolationForest": result.mask}
+    if brute_mask is not None:
+        masks[brute.display_name] = brute_mask
+    timeline = alert_timeline(result.df, masks)
+    st.markdown("##### Тревоги по времени")
+    if timeline is None:
+        st.caption("В файле нет времени потоков (Timestamp) — график недоступен.")
+    else:
+        st.altair_chart(timeline_chart(timeline, list(masks), _theme()), width="stretch")
+
+    flagged = brute_mask if brute_mask is not None else result.mask
+    source = brute.display_name if brute_mask is not None else "IsolationForest"
+    peers = top_peers(result.df, flagged)
+    if peers is None:
+        st.caption("В файле нет адресов и портов — топ-списки недоступны.")
+        return
+    left, right = st.columns(2)
+    left.markdown(f"##### Адреса с наибольшим числом тревог ({source})")
+    right.markdown(f"##### Порты сервера под ударом ({source})")
+    if peers.empty:
+        left.caption("Тревог нет.")
+        return
+    left.altair_chart(top_chart(peers, "Адрес", _theme()), width="stretch")
+    right.altair_chart(top_chart(top_ports(result.df, flagged), "Порт", _theme()),
+                       width="stretch")
+
+
+def _render_incidents(brute, brute_probs, brute_mask, incidents) -> None:
     """Подозрительные потоки, сведённые в инциденты по внешнему адресу за час."""
+    if brute_mask is None:
+        st.info("Инциденты собираются из срабатываний классификатора атак, а его у модели нет.")
+        return
     if incidents is None:
         st.caption(
             "Инциденты по адресам не собраны: в файле нет Src/Dst IP и портов "
             "(их добавляет pcap_to_flows.py)."
         )
         return
-    st.subheader(f"Инциденты: {brute.display_name}")
     if not len(incidents):
         st.success(
-            "Подозрительные потоки есть, но ни один адрес не дал инцидента: "
-            "единичные срабатывания, скорее всего ложные."
+            "Ни один адрес не дал инцидента: тревог нет или они единичные — "
+            "скорее всего, ложные."
         )
         return
-    view = incidents.drop(columns=["rows"]).rename(
-        columns={
-            "window_start": "Час",
-            "peer": "Адрес",
-            "flows": "Потоков",
-            "services": "Порты сервера",
-            "max_proba": "Макс. p",
-            "first_seen": "Первый",
-            "last_seen": "Последний",
-            "reason": "Почему инцидент",
-        }
+    # Порядок как в таблице: сначала больше потоков; для перехода — самый уверенный поток
+    ordered = incidents.sort_values(["flows", "max_proba"], ascending=False).reset_index(drop=True)
+    ordered["top_row"] = [max(rows, key=lambda r: brute_probs[r]) for rows in ordered["rows"]]
+    view = ordered.drop(columns=["rows"]).rename(columns={
+        "window_start": "Час", "peer": "Адрес", "flows": "Потоков",
+        "services": "Порты сервера", "max_proba": "Макс. вероятность",
+        "first_seen": "Первый", "last_seen": "Последний", "reason": "Почему инцидент",
+        "top_row": "#",
+    })
+    st.caption("Нажмите на строку — откроется разбор самого уверенного потока инцидента.")
+    event = st.dataframe(
+        view, hide_index=True, on_select="rerun", selection_mode="single-row",
+        key="incidents_table",
+        column_config={
+            "Час": st.column_config.DatetimeColumn(format="DD.MM HH:mm"),
+            "Первый": st.column_config.DatetimeColumn(format="HH:mm:ss"),
+            "Последний": st.column_config.DatetimeColumn(format="HH:mm:ss"),
+            "Макс. вероятность": st.column_config.ProgressColumn(min_value=0.0, max_value=1.0, format="%.2f"),
+            "#": st.column_config.NumberColumn("Поток", help="Номер самого уверенного потока"),
+        },
     )
-    st.dataframe(view, hide_index=True)
     st.caption(
         f"{summarize(incidents, brute_mask)}. Инцидент — поток на порт "
         f"{', '.join(map(str, DEFAULT_IMMEDIATE_PORTS))} или ≥{DEFAULT_MIN_FLOWS} "
         "подозрительных потоков с одного адреса за час; единичные срабатывания "
         "на других портах — почти всегда ложные."
     )
+    _jump_on_select(event, view, "incidents_jump")
+
+
+def _render_flows(result: DetectionResult, brute, brute_probs, brute_mask) -> None:
+    filters = []
+    if brute_mask is not None:
+        filters.append(f"Тревоги: {brute.display_name}")
+    filters += ["Аномалии IsolationForest", "Все потоки"]
+    if "flows_filter" not in st.session_state and st.session_state.get("flows_choice") in filters:
+        st.session_state.flows_filter = st.session_state.flows_choice  # после другой вкладки
+    choice = st.radio("Показать", filters, horizontal=True, key="flows_filter",
+                      label_visibility="collapsed")
+    st.session_state.flows_choice = choice
+    if choice.startswith("Тревоги"):
+        rows = np.flatnonzero(brute_mask)
+        rows = rows[np.argsort(-brute_probs[rows], kind="stable")]
+    elif choice.startswith("Аномалии"):
+        rows = result.indices[np.argsort(result.scores[result.indices], kind="stable")]
+    else:
+        rows = np.arange(result.total)
+    if not len(rows):
+        st.success("Таких потоков нет.")
+        return
+    shown = rows[:TABLE_LIMIT]
+    table = flow_table(result, shown, brute_probs)
+    st.caption(
+        f"Показано {len(shown):,} из {len(rows):,} (сначала самые подозрительные). "
+        "Нажмите на строку — откроется разбор потока."
+    )
+    event = st.dataframe(
+        table, hide_index=True, on_select="rerun", selection_mode="single-row",
+        key=f"flows_table_{filters.index(choice)}",
+        column_config={
+            "#": st.column_config.NumberColumn("Строка", format="%d"),
+            "Вероятность атаки": st.column_config.ProgressColumn(
+                min_value=0.0, max_value=1.0, format="%.2f",
+                help="Уверенность классификатора; тревога — выше порога "
+                     + (f"{brute.threshold:.2f}" if brute is not None else "")),
+            "IF score": st.column_config.NumberColumn(
+                help="Меньше — необычнее; аномалия — не выше порога IsolationForest"),
+        },
+    )
+    _jump_on_select(event, table, f"flows_jump_{filters.index(choice)}")
 
 
 def _render_analysis(
@@ -555,50 +750,25 @@ def _render_analysis(
     brute_mask = None
     if brute is not None and brute_payload is not None:
         brute_probs, brute_mask = brute_payload
-
-    cols = st.columns(4 if brute_mask is not None else 3)
-    cols[0].metric("Всего записей", f"{result.total:,}")
-    cols[1].metric("Аномалии (IF)", f"{result.n_anomalies:,}")
-    cols[2].metric("Доля аномалий", f"{result.share:.2%}")
-    if brute_mask is not None:
-        cols[3].metric(brute.display_name, f"{int(brute_mask.sum()):,}")
-        cols[3].caption(
-            f"порог {brute.threshold:.3f} · FPR ≈ "
-            f"{float(brute.metadata.get('target_fpr', 0)):.2%}"
-        )
-
-    if result.info.get("inf_replaced") or result.info.get("nan_filled"):
-        st.warning(
-            f"В данных найдено inf: {result.info.get('inf_replaced', 0)}, "
-            f"пропусков: {result.info.get('nan_filled', 0)}. "
-            "Они заменены средними значениями нормы."
-        )
-
-    if result.n_anomalies:
-        st.subheader("Аномальные записи (IsolationForest)")
-        st.dataframe(result.df[result.mask].head(10), hide_index=True)
-    else:
-        st.success("Аномалий IsolationForest не обнаружено")
-
-    incidents = None
-    if brute_mask is not None and brute_mask.any():
-        incidents = _compute_incidents(result, brute_probs, brute_mask)
-        _render_incidents(brute, brute_mask, incidents)
-        st.subheader(f"Подозрения: {brute.display_name} (supervised)")
-        flagged = np.flatnonzero(brute_mask)
-        top = flagged[np.argsort(-brute_probs[flagged])][:10]
-        view = result.df.iloc[top].copy()
-        view[f"{brute.display_name} p"] = np.round(brute_probs[top], 3)
-        st.dataframe(view, hide_index=True)
-        st.caption(
-            f"Порог {brute.threshold:.3f}; модель обучена на размеченных потоках "
-            f"{'целевой сети' if brute.metadata.get('adaptation') else 'CICIDS'}. "
-            f"Совпадений с IF: {int((result.mask & brute_mask).sum()):,}."
-        )
-
-    _render_flow_review(
-        result, means, stds, brute, brute_probs, brute_mask, incidents, provider
+    incidents = (
+        _compute_incidents(result, brute_probs, brute_mask) if brute_mask is not None else None
     )
+
+    pending = st.session_state.pop("goto_view", None)
+    if pending is not None:
+        st.session_state.view = pending  # до создания переключателя вкладок
+    view = st.radio("Раздел", VIEWS, horizontal=True, key="view", label_visibility="collapsed")
+    st.divider()
+    if view == "Обзор":
+        _render_overview(result, brute, brute_probs, brute_mask, incidents)
+    elif view == "Инциденты":
+        _render_incidents(brute, brute_probs, brute_mask, incidents)
+    elif view == "Потоки":
+        _render_flows(result, brute, brute_probs, brute_mask)
+    else:
+        _render_flow_review(
+            result, means, stds, brute, brute_probs, brute_mask, incidents, provider
+        )
 
 
 def _reset_analysis() -> None:
