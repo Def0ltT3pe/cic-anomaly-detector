@@ -373,6 +373,14 @@ def _safe_auc(y: np.ndarray, scores: np.ndarray) -> float | None:
     return float(roc_auc_score(y, scores))
 
 
+SUMMARY_KEYS = ("rows", "attacks", "auc", "fpr", "recall", "families")
+
+
+def summarize_metrics(metrics: dict, keys=SUMMARY_KEYS) -> dict:
+    """Метрики evaluate_scores без лишних полей — для metadata.json."""
+    return {key: metrics.get(key) for key in keys}
+
+
 def evaluate_scores(
     target: Dataset,
     scores: np.ndarray,

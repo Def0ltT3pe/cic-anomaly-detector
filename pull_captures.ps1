@@ -80,6 +80,21 @@ find . -type f \( $names \) -printf '%P\t%s\t%T@\n'
     return Invoke-Remote $Server.target $script
 }
 
+function Resolve-LocalPath([string]$LocalRoot, [string]$RelativePath) {
+    <# Путь из списка сервера -> локальный внутри LocalRoot; $null, если путь
+       выходит за LocalRoot или имя не похоже на файл сбора. Список присылает
+       сервер, а взломанный сервер может прислать «..\..\Startup\x.cmd». #>
+    if ([string]::IsNullOrWhiteSpace($RelativePath) -or $RelativePath -match '^[/\\]|:|(^|[/\\])\.\.([/\\]|$)') {
+        return $null
+    }
+    $leaf = Split-Path $RelativePath -Leaf
+    if (-not ($Patterns | Where-Object { $leaf -like $_ })) { return $null }
+    $root = [IO.Path]::GetFullPath($LocalRoot).TrimEnd('\') + '\'
+    $full = [IO.Path]::GetFullPath((Join-Path $LocalRoot ($RelativePath -replace '/', '\')))
+    if (-not $full.StartsWith($root, [StringComparison]::OrdinalIgnoreCase)) { return $null }
+    return $full
+}
+
 function Get-PullPlan([string[]]$Listing, [string]$LocalRoot) {
     <# Строки «NOW\t<epoch>» и «<путь>\t<размер>\t<mtime>» -> что качать. #>
     $now = $null
@@ -105,7 +120,11 @@ function Get-PullPlan([string[]]$Listing, [string]$LocalRoot) {
         }
 
     foreach ($file in $files) {
-        $local = Join-Path $LocalRoot ($file.Path -replace '/', '\')
+        $local = Resolve-LocalPath $LocalRoot $file.Path
+        if (-not $local) {
+            Write-Log "  пропуск (недопустимый путь от сервера): $($file.Path)"
+            continue
+        }
         $leaf = Split-Path $file.Path -Leaf
         $reason = $null
         if ($active.ContainsKey($file.Path)) {

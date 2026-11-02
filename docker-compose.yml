@@ -4,9 +4,9 @@ services:
     image: cic-anomaly-detector:latest
     container_name: cic_anomaly_detector
     ports:
-      # 0.0.0.0 — доступ по сети; 127.0.0.1 — только с этой машины.
-      # Для публичного сервера обязательно задайте APP_PASSWORD или поставьте reverse proxy.
-      - "${APP_BIND:-0.0.0.0}:${APP_PORT:-8501}:8501"
+      # По умолчанию только с этой машины; доступ по сети — APP_BIND=0.0.0.0
+      # (тогда нужны пользователи или APP_PASSWORD и reverse proxy с TLS).
+      - "${APP_BIND:-127.0.0.1}:${APP_PORT:-8501}:8501"
     environment:
       # Пустое значение = пояснения ИИ отключены, детекция работает.
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
@@ -20,6 +20,9 @@ services:
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
       LLM_PROVIDER: ${LLM_PROVIDER:-}
       APP_PASSWORD: ${APP_PASSWORD:-}
+      # Без пользователей и APP_PASSWORD приложение не откроется; 1 — пускать
+      # всех как admin без пароля (только для локальной проверки).
+      ALLOW_OPEN_MODE: ${ALLOW_OPEN_MODE:-0}
       # models — рабочая модель, models_v2 — экспериментальная.
       MODEL_DIR: ${MODEL_DIR:-models}
       # Доп. модели для выбора в интерфейсе: путь внутри контейнера (см. volumes).
@@ -29,7 +32,7 @@ services:
       # 0 — отключить проверку SHA-256 моделей.
       VERIFY_MODEL_CHECKSUMS: ${VERIFY_MODEL_CHECKSUMS:-1}
     volumes:
-      # users.json читается с хоста; каталог можно не создавать — будет открытый режим.
+      # users.json читается с хоста; без него нужен APP_PASSWORD (см. ALLOW_OPEN_MODE).
       - ./config:/app/config:ro
       # журнал аудита переживает перезапуск контейнера
       - audit_data:/app/audit

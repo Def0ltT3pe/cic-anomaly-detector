@@ -30,7 +30,6 @@ from __future__ import annotations
 
 import argparse
 import glob
-import json
 import os
 import shutil
 import sys
@@ -40,17 +39,15 @@ import joblib
 import numpy as np
 import pandas as pd
 from sklearn.ensemble import IsolationForest, RandomForestClassifier
-from sklearn.pipeline import make_pipeline
-from sklearn.preprocessing import FunctionTransformer, StandardScaler
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 if BASE_DIR not in sys.path:
     sys.path.insert(0, BASE_DIR)
 
-from evaluate import Dataset, attack_family, evaluate_scores
+from evaluate import Dataset, attack_family, evaluate_scores, summarize_metrics
 from modules.bruteforce import BruteForceError, load_bruteforce
 from modules.calibration import CALIBRATION_FILE, CalibrationError, load_calibration
-from modules.integrity import CHECKSUMS_FILE, public_key_path, write_checksums
+from modules.integrity import CHECKSUMS_FILE, public_key_path, write_checksums, write_json
 from modules.model_loader import (
     STATS_FILE,
     ModelLoadError,
@@ -58,7 +55,7 @@ from modules.model_loader import (
     load_normal_stats,
     resolve_model_dir,
 )
-from modules.pipeline import FeatureValidationError, prepare_features, signed_log1p
+from modules.pipeline import FeatureValidationError, if_scores, make_scaler, prepare_features
 
 MIN_BENIGN_TRAIN = 1_000
 MIN_BENIGN_HOLDOUT = 200
@@ -226,24 +223,11 @@ def load_target(
     )
 
 
-def _if_scores(model, scaler, selector, X: pd.DataFrame) -> np.ndarray:
-    """decision_function: меньше — аномальнее (как в pipeline.detect_anomalies)."""
-    scaled = scaler.transform(X)
-    if selector is not None:
-        scaled = selector.transform(scaled)
-    return np.asarray(model.decision_function(scaled), dtype=float)
-
-
 def _strict_threshold(quantile: float) -> float:
     """BruteForceDetector помечает proba >= threshold. У RF много одинаковых
     вероятностей (часто 0), поэтому порог чуть выше квантиля: иначе квантиль 0
     пометил бы весь трафик."""
     return float(np.nextafter(quantile, np.inf))
-
-
-def _summary(metrics: dict) -> dict:
-    keys = ("rows", "attacks", "auc", "fpr", "recall", "families")
-    return {key: metrics.get(key) for key in keys}
 
 
 def adapt(args) -> dict:
@@ -302,16 +286,8 @@ def adapt(args) -> dict:
         print(f"Заполнено пропусков/inf средними нормы сети: {info['nan_filled']:,}")
 
     # --- IsolationForest на benign целевой сети
-    def make_scaler():
-        if args.log1p:
-            return make_pipeline(
-                FunctionTransformer(signed_log1p, feature_names_out="one-to-one"),
-                StandardScaler(),
-            )
-        return StandardScaler()
-
     def fit_if(rows: np.ndarray):
-        scaler = make_scaler().fit(X.iloc[rows])
+        scaler = make_scaler(args.log1p).fit(X.iloc[rows])
         model = IsolationForest(
             n_estimators=args.n_estimators, random_state=args.seed, n_jobs=args.n_jobs
         ).fit(scaler.transform(X.iloc[rows]))
@@ -321,7 +297,7 @@ def adapt(args) -> dict:
     scaler, model = fit_if(train_rows)
     trimmed = 0
     if args.trim > 0:
-        train_scores = _if_scores(model, scaler, None, X.iloc[train_rows])
+        train_scores = if_scores(model, scaler, None, X.iloc[train_rows])
         cut = np.quantile(train_scores, args.trim)
         keep = train_rows[train_scores > cut]
         trimmed = len(train_rows) - len(keep)
@@ -329,7 +305,7 @@ def adapt(args) -> dict:
         scaler, model = fit_if(train_rows)
         print(f"Отброшено самых аномальных benign-строк: {trimmed:,}")
 
-    holdout_benign_scores = _if_scores(model, scaler, None, X.iloc[benign_holdout])
+    holdout_benign_scores = if_scores(model, scaler, None, X.iloc[benign_holdout])
     threshold = float(np.quantile(holdout_benign_scores, args.target_fpr))
     holdout_fpr = float((holdout_benign_scores <= threshold).mean())
 
@@ -338,17 +314,17 @@ def adapt(args) -> dict:
         name="target", X=X, labels=labels, files=pd.Series(["target"] * len(X))
     )
     X_base, _ = prepare_features(frame.iloc[holdout_idx], cols, fill_values=base_means)
-    base_scores = _if_scores(base_model, base_scaler, base_selector, X_base)
+    base_scores = if_scores(base_model, base_scaler, base_selector, X_base)
     # Без калибровки базовая модель работает через predict(): аномалия при score < 0
     base_threshold = base_calibration.threshold if base_calibration is not None else 0.0
-    adapted_scores = _if_scores(model, scaler, None, X.iloc[holdout_idx])
+    adapted_scores = if_scores(model, scaler, None, X.iloc[holdout_idx])
     # evaluate_scores считает «больше — аномальнее» и flagged = score > threshold
     evaluation = {
         "isolation_forest": {
-            "base": _summary(
+            "base": summarize_metrics(
                 evaluate_scores(holdout_data, -base_scores, -base_threshold, args.target_fpr, holdout_idx)
             ),
-            "adapted": _summary(
+            "adapted": summarize_metrics(
                 evaluate_scores(holdout_data, -adapted_scores, -threshold, args.target_fpr, holdout_idx)
             ),
         }
@@ -449,7 +425,7 @@ def adapt(args) -> dict:
             "mode": mode,
             "classifier": effective,
             "display_name": display_name,
-            "base": _summary(
+            "base": summarize_metrics(
                 evaluate_scores(
                     holdout_view,
                     base_proba,
@@ -458,7 +434,7 @@ def adapt(args) -> dict:
                     holdout_idx,
                 )
             ),
-            "adapted": _summary(
+            "adapted": summarize_metrics(
                 evaluate_scores(
                     holdout_view,
                     adapted_proba,
@@ -511,15 +487,15 @@ def adapt(args) -> dict:
         t_X_base, _ = prepare_features(t_frame, cols, fill_values=base_means)
         t_files = pd.Series(["test"] * len(t_frame))
         t_view = Dataset(name="test", X=t_X, labels=t_labels, files=t_files)
-        t_base_scores = _if_scores(base_model, base_scaler, base_selector, t_X_base)
-        t_scores = _if_scores(model, scaler, None, t_X)
+        t_base_scores = if_scores(base_model, base_scaler, base_selector, t_X_base)
+        t_scores = if_scores(model, scaler, None, t_X)
         evaluation_test = {
             "files": [os.path.basename(path) for path in test_files],
             "labeled": t_labeled,
             "isolation_forest": {
-                "base": _summary(evaluate_scores(
+                "base": summarize_metrics(evaluate_scores(
                     t_view, -t_base_scores, -base_threshold, args.target_fpr, t_index)),
-                "adapted": _summary(evaluate_scores(
+                "adapted": summarize_metrics(evaluate_scores(
                     t_view, -t_scores, -threshold, args.target_fpr, t_index)),
             },
         }
@@ -537,11 +513,11 @@ def adapt(args) -> dict:
                 "mode": mode,
                 "classifier": effective,
                 "display_name": display_name,
-                "base": _summary(evaluate_scores(
+                "base": summarize_metrics(evaluate_scores(
                     t_sup, base_brute.predict_proba(t_X_base),
                     float(np.nextafter(base_brute.threshold, -np.inf)),
                     args.brute_target_fpr, t_index)),
-                "adapted": _summary(evaluate_scores(
+                "adapted": summarize_metrics(evaluate_scores(
                     t_sup, brute_model.predict_proba(t_X[feature_cols])[:, 1],
                     float(np.nextafter(brute_threshold, -np.inf)),
                     args.brute_target_fpr, t_index)),
@@ -558,7 +534,7 @@ def adapt(args) -> dict:
     joblib.dump(model, os.path.join(output_dir, "isolation_forest.pkl"), compress=3)
     joblib.dump(scaler, os.path.join(output_dir, "scaler.pkl"))
     joblib.dump(list(cols), os.path.join(output_dir, "feature_cols_filtered.pkl"))
-    _write_json(
+    write_json(
         os.path.join(output_dir, STATS_FILE),
         {
             "source": ", ".join(os.path.basename(path) for path in files),
@@ -570,7 +546,7 @@ def adapt(args) -> dict:
             "std_from_base": replaced_std,
         },
     )
-    _write_json(
+    write_json(
         os.path.join(output_dir, CALIBRATION_FILE),
         {
             "threshold": threshold,
@@ -586,7 +562,7 @@ def adapt(args) -> dict:
     )
     if brute_payload is not None:
         joblib.dump(brute_model, os.path.join(output_dir, "bruteforce.pkl"), compress=3)
-        _write_json(os.path.join(output_dir, "bruteforce.json"), brute_payload)
+        write_json(os.path.join(output_dir, "bruteforce.json"), brute_payload)
 
     metadata = {
         "version": "site-adapted",
@@ -609,7 +585,7 @@ def adapt(args) -> dict:
         "evaluation": evaluation,
         "evaluation_test": evaluation_test,
     }
-    _write_json(os.path.join(output_dir, "metadata.json"), metadata)
+    write_json(os.path.join(output_dir, "metadata.json"), metadata)
 
     checksums = write_checksums(output_dir)
     metadata["signed"] = "signature" in checksums
@@ -623,11 +599,6 @@ def _display_path(path: str) -> str:
     except ValueError:
         return os.path.abspath(path)
     return os.path.abspath(path) if relative.startswith("..") else relative
-
-
-def _write_json(path: str, payload: dict) -> None:
-    with open(path, "w", encoding="utf-8", newline="\n") as handle:
-        json.dump(payload, handle, ensure_ascii=False, indent=2)
 
 
 def _fmt(value, pattern="{:.3f}") -> str:
