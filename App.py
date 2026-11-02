@@ -171,7 +171,8 @@ def _login_locked(username: str) -> bool:
 
 
 def _login_screen() -> None:
-    """Логин по users.json; fallback — общий APP_PASSWORD; иначе открытый режим."""
+    """Логин по users.json; fallback — общий APP_PASSWORD; иначе открытый режим
+    (если не запрещён ALLOW_OPEN_MODE=0)."""
     if st.session_state.get("user"):
         return
 
@@ -183,6 +184,15 @@ def _login_screen() -> None:
 
     shared = _app_password()
     if not users and not shared:
+        if os.environ.get("ALLOW_OPEN_MODE", "1").strip() == "0":
+            # В Docker открытый режим выключен: без пароля вошёл бы кто угодно как admin
+            st.title("Вход не настроен")
+            st.error(
+                "Создайте пользователя (`python manage_users.py add admin --role admin`, "
+                "файл config/users.json) или задайте APP_PASSWORD. Открыть приложение "
+                "без пароля можно только явно: ALLOW_OPEN_MODE=1."
+            )
+            st.stop()
         st.session_state.user = "anonymous"
         st.session_state.role = "admin"
         st.session_state.auth_mode = "open"
