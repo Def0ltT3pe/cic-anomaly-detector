@@ -6,18 +6,20 @@ import numpy as np
 import pandas as pd
 
 
-def explain_anomaly(record, means, stds, top_n: int = 3) -> str:
-    """Описывает top_n самых сильных отклонений записи от benign-нормы.
+def feature_deviations(record, means, stds, top_n: int = 3) -> pd.DataFrame:
+    """top_n признаков с наибольшим |z| относительно benign-нормы.
 
+    Колонки: feature, value, mean, std, z, ratio (value/mean, NaN при mean ≤ 0).
     Устойчиво к NaN/inf и нулевым std: такие признаки просто пропускаются,
     вместо падения с ZeroDivisionError/ValueError.
     """
+    columns = ["feature", "value", "mean", "std", "z", "ratio"]
     if top_n is None or top_n < 1:
         top_n = 1
 
     features = [col for col in record.index if col in means.index and col in stds.index]
     if not features:
-        return "  - отклонения не рассчитаны: нет общих признаков со статистиками."
+        return pd.DataFrame(columns=columns)
 
     values = pd.to_numeric(record[features], errors="coerce").astype(float)
     mu = pd.to_numeric(means[features], errors="coerce").astype(float)
@@ -30,23 +32,36 @@ def explain_anomaly(record, means, stds, top_n: int = 3) -> str:
         & (sd > 0)
     )
     if not bool(valid.any()):
-        return "  - отклонения не рассчитаны: статистики для признаков некорректны."
+        return pd.DataFrame(columns=columns)
 
     z_scores = (values[valid] - mu[valid]) / sd[valid]
-    top_features = z_scores.abs().nlargest(min(top_n, len(z_scores))).index
+    top = z_scores.abs().nlargest(min(top_n, len(z_scores))).index
+    mean_top = mu[top]
+    return pd.DataFrame({
+        "feature": list(top),
+        "value": values[top].to_numpy(),
+        "mean": mean_top.to_numpy(),
+        "std": sd[top].to_numpy(),
+        "z": z_scores[top].to_numpy(),
+        "ratio": (values[top] / mean_top.where(mean_top > 0)).to_numpy(),
+    })
+
+
+def explain_anomaly(record, means, stds, top_n: int = 3) -> str:
+    """Описывает top_n самых сильных отклонений записи от benign-нормы."""
+    features = [col for col in record.index if col in means.index and col in stds.index]
+    if not features:
+        return "  - отклонения не рассчитаны: нет общих признаков со статистиками."
+
+    deviations = feature_deviations(record, means, stds, top_n)
+    if deviations.empty:
+        return "  - отклонения не рассчитаны: статистики для признаков некорректны."
 
     lines = []
-    for feature in top_features:
-        value = float(values[feature])
-        mean_value = float(mu[feature])
-        std_value = float(sd[feature])
-        z_value = float(z_scores[feature])
-        direction = "выше" if z_value > 0 else "ниже"
+    for row in deviations.itertuples(index=False):
+        direction = "выше" if row.z > 0 else "ниже"
         lines.append(
-            f"  - {feature}: {value:.2f} (норма {mean_value:.2f} ± {std_value:.2f}, "
-            f"отклонение {direction} на {abs(z_value):.1f} сигм)"
+            f"  - {row.feature}: {row.value:.2f} (норма {row.mean:.2f} ± {row.std:.2f}, "
+            f"отклонение {direction} на {abs(row.z):.1f} сигм)"
         )
-
-    if not lines:
-        return "  - отклонения не рассчитаны: значимых признаков не найдено."
     return "\n".join(lines)

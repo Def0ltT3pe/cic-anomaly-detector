@@ -1,0 +1,34 @@
+{
+  "_comment": "Скопируйте в config/llm.json. Ключи сюда не пишутся: api_key_env — имя переменной окружения (или ключа в .streamlit/secrets.toml), а ключ можно ввести и в интерфейсе. type: gemini, openai (любой OpenAI-совместимый API) или anthropic. Без api_key_env ключ не нужен (локальные модели).",
+  "providers": [
+    {
+      "id": "ollama",
+      "name": "Ollama (локально)",
+      "type": "openai",
+      "base_url": "http://localhost:11434/v1",
+      "model": "llama3.1"
+    },
+    {
+      "id": "lmstudio",
+      "name": "LM Studio (локально)",
+      "type": "openai",
+      "base_url": "http://localhost:1234/v1",
+      "model": "local-model"
+    },
+    {
+      "id": "claude-sonnet",
+      "name": "Claude Sonnet",
+      "type": "anthropic",
+      "model": "claude-sonnet-5-5",
+      "api_key_env": "ANTHROPIC_API_KEY"
+    },
+    {
+      "id": "deepseek-reasoner",
+      "name": "DeepSeek Reasoner",
+      "type": "openai",
+      "base_url": "https://api.deepseek.com/v1",
+      "model": "deepseek-reasoner",
+      "api_key_env": "DEEPSEEK_API_KEY"
+    }
+  ]
+}
