@@ -8,7 +8,6 @@ import os
 import shutil
 import sys
 import tempfile
-import time
 from typing import NamedTuple
 
 import numpy as np
@@ -28,6 +27,7 @@ from modules.alerts import (
 )
 from modules.audit import log_event, read_recent
 from modules.auth import (
+    LOGIN_THROTTLE,
     AuthError,
     authenticate,
     can_use_llm,
@@ -145,10 +145,6 @@ def _load_assets(model_dir: str) -> Assets:
     return Assets(model, scaler, selector, feature_cols, means, stds, calibration, brute, errors)
 
 
-MAX_LOGIN_ATTEMPTS = 5
-LOCK_SECONDS = 60
-
-
 def _app_password() -> str:
     password = (os.environ.get("APP_PASSWORD") or "").strip()
     if password:
@@ -160,12 +156,18 @@ def _app_password() -> str:
 
 
 def _register_failed_login(username: str) -> None:
-    attempts = int(st.session_state.get("login_attempts", 0)) + 1
-    st.session_state.login_attempts = attempts
+    attempts = LOGIN_THROTTLE.failed(username)
     log_event(username or "-", "-", "login_failed", attempt=attempts)
-    if attempts >= MAX_LOGIN_ATTEMPTS:
-        st.session_state.lock_until = time.time() + LOCK_SECONDS
-        st.session_state.login_attempts = 0
+
+
+def _login_locked(username: str) -> bool:
+    """Логин заблокирован после серии неудач (в любой сессии): показать ошибку."""
+    seconds = LOGIN_THROTTLE.locked_for(username)
+    if seconds <= 0:
+        return False
+    log_event(username or "-", "-", "login_locked")
+    st.error(f"Слишком много неудачных попыток. Повторите через {int(seconds) + 1} с.")
+    return True
 
 
 def _login_screen() -> None:
@@ -187,26 +189,18 @@ def _login_screen() -> None:
         return
 
     st.title("Вход")
-    lock_until = float(st.session_state.get("lock_until", 0.0))
-    if time.time() < lock_until:
-        st.error(
-            "Слишком много неудачных попыток. Повторите через "
-            f"{int(lock_until - time.time()) + 1} с."
-        )
-        st.stop()
-
     if users:
         with st.form("login_form"):
             username = st.text_input("Логин")
             password = st.text_input("Пароль", type="password")
             submitted = st.form_submit_button("Войти", type="primary")
-        if submitted:
+        if submitted and not _login_locked(username):
             user = authenticate(username, password)
             if user is not None:
+                LOGIN_THROTTLE.succeeded(username)
                 st.session_state.user = user.username
                 st.session_state.role = user.role
                 st.session_state.auth_mode = "users"
-                st.session_state.login_attempts = 0
                 log_event(user.username, user.role, "login", mode="password")
                 st.rerun()
             _register_failed_login(username)
@@ -215,12 +209,12 @@ def _login_screen() -> None:
         with st.form("login_form"):
             password = st.text_input("Пароль", type="password")
             submitted = st.form_submit_button("Войти", type="primary")
-        if submitted:
+        if submitted and not _login_locked("shared"):
             if hmac.compare_digest(password.encode("utf-8"), shared.encode("utf-8")):
+                LOGIN_THROTTLE.succeeded("shared")
                 st.session_state.user = "shared"
                 st.session_state.role = "admin"
                 st.session_state.auth_mode = "shared"
-                st.session_state.login_attempts = 0
                 log_event("shared", "admin", "login", mode="shared")
                 st.rerun()
             _register_failed_login("shared")
@@ -243,8 +237,6 @@ def _init_state() -> None:
         "user": None,
         "role": None,
         "auth_mode": None,
-        "login_attempts": 0,
-        "lock_until": 0.0,
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -299,8 +291,6 @@ def _render_identity() -> None:
             "explanations",
             "brute",
             "llm_keys",
-            "login_attempts",
-            "lock_until",
         ):
             st.session_state.pop(key, None)
         st.rerun()

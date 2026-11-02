@@ -51,6 +51,20 @@ class IntegrityTests(unittest.TestCase):
             with self.assertRaises(IntegrityError):
                 verify_checksums(self.dir, ["dummy.pkl"])
 
+    def test_missing_checksums_are_rejected(self):
+        # Удалённый checksums.json не должен отключать проверку подписи
+        with patch.dict(os.environ, self.env, clear=False):
+            with self.assertRaises(IntegrityError):
+                verify_checksums(self.dir, ["dummy.pkl"])
+            with self.assertRaises(IntegrityError):
+                verify_if_listed(self.dir, ["dummy.pkl"])
+
+    def test_missing_checksums_allowed_without_key_or_with_override(self):
+        missing_key = {**self.env, "MODEL_PUBLIC_KEY": os.path.join(self.dir, "absent.pem")}
+        for env in (missing_key, {**self.env, "ALLOW_UNSIGNED_MODELS": "1"}):
+            with patch.dict(os.environ, env, clear=False):
+                self.assertIsNone(verify_checksums(self.dir, ["dummy.pkl"]))
+
     def test_tampered_signature_is_detected(self):
         with patch.dict(os.environ, self.env, clear=False):
             write_checksums(self.dir, ["dummy.pkl"], key_path=self.private)
