@@ -152,7 +152,10 @@ streamlit run App.py
 | `OPENAI_API_KEY` | пусто | Ключ OpenAI-совместимого API |
 | `OPENAI_BASE_URL` | `https://api.openai.com/v1` | Адрес API: OpenRouter, DeepSeek, локальные Ollama/LM Studio |
 | `OPENAI_MODEL` | `gpt-4o-mini` | Модель OpenAI-совместимого API |
-| `LLM_PROVIDER` | первый настроенный | `gemini` или `openai` — LLM по умолчанию |
+| `ANTHROPIC_API_KEY` / `CLAUDE_MODEL` | пусто / `claude-opus-5-5` | Claude |
+| `DEEPSEEK_API_KEY`, `OPENROUTER_API_KEY` | пусто | DeepSeek, OpenRouter (модели — `DEEPSEEK_MODEL`, `OPENROUTER_MODEL`) |
+| `LLM_CONFIG` | `config/llm.json` | Свои варианты LLM (образец — `config/llm.example.json`) |
+| `LLM_PROVIDER` | первый настроенный | id варианта LLM по умолчанию (`gemini`, `claude`, `openai`…) |
 | `APP_PASSWORD` | пусто | Общий пароль, если нет `users.json` |
 | `USERS_FILE` | `config/users.json` | Файл пользователей |
 | `AUDIT_LOG` | `audit/audit.jsonl` | Журнал аудита |
@@ -572,16 +575,32 @@ IsolationForest) или по номеру строки. Для потока ср
 маскируются («сервер», «внешний 185.12.x.x»); реальные IP видны только
 в приложении. Роль viewer видит факты без вопросов к ИИ.
 
-Провайдеры (выбор — в боковой панели, по умолчанию `LLM_PROVIDER`):
-- **Gemini** — `GEMINI_API_KEY`, `GEMINI_MODEL`;
-- **OpenAI-совместимый** — `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `OPENAI_MODEL`.
-  Так же подключаются OpenRouter, DeepSeek и
-  локальные Ollama (`OPENAI_BASE_URL=http://localhost:11434/v1`, ключ не
-  нужен) или LM Studio.
+В боковой панели («LLM для разбора») — список всех вариантов; те, для
+которых ещё нет ключа, помечены «нужен ключ». По умолчанию выбран
+`LLM_PROVIDER` (id из таблицы), иначе первый с ключом.
 
-Оба провайдера вызываются напрямую по HTTP (потоковый ответ, SSE), без SDK:
-потоковый режим `google-genai` зависал без ответа, хотя тот же запрос по
-HTTP приходил за секунды. Таймаут ожидания — 120 с на каждое чтение
+| id | Вариант | Ключ | Модель (по умолчанию) |
+|---|---|---|---|
+| `gemini` | Gemini | `GEMINI_API_KEY` | `GEMINI_MODEL` (`gemini-3.8-flash`) |
+| `claude` | Claude | `ANTHROPIC_API_KEY` | `CLAUDE_MODEL` (`claude-opus-5-5`) |
+| `openai` | ChatGPT / OpenAI-совместимый | `OPENAI_API_KEY` | `OPENAI_MODEL` (`gpt-4o-mini`) |
+| `deepseek` | DeepSeek | `DEEPSEEK_API_KEY` | `DEEPSEEK_MODEL` (`deepseek-chat`) |
+| `openrouter` | OpenRouter | `OPENROUTER_API_KEY` | `OPENROUTER_MODEL` (`openrouter/auto`) |
+
+`OPENAI_BASE_URL` переключает вариант `openai` на любой OpenAI-совместимый
+адрес (тогда ключ не обязателен). Свои варианты — локальные Ollama и LM
+Studio, другие модели того же провайдера — добавляются в `config/llm.json`
+(образец — `config/llm.example.json`, путь — `LLM_CONFIG`): `id`, `name`,
+`type` (`gemini`, `openai`, `anthropic`), `base_url`, `model` и
+`api_key_env` — имя переменной с ключом; самих ключей в файле нет. Адреса
+задаются только там и в переменных окружения, из интерфейса — нет.
+
+Gemini и OpenAI-совместимые API вызываются напрямую по HTTP (потоковый
+ответ, SSE): потоковый режим SDK `google-genai` зависал без ответа, хотя тот
+же запрос по HTTP приходил за секунды. Claude — через официальный SDK
+`anthropic`; при отказе фильтра безопасности запрос сам повторяется на
+рекомендованной модели (`fallbacks: "default"`, для Opus 5.5 / Opus 5 /
+Fable 5.1 / Sonnet 5.5). Таймаут ожидания — 120 с на каждое чтение
 («думающие» модели молчат до первого куска); повторы — только при сбоях
 сети, 408/409/429 и 5xx.
 

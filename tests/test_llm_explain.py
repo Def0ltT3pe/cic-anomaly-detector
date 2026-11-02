@@ -8,13 +8,21 @@ from unittest.mock import patch
 from modules import llm_explain
 from modules.llm_explain import (
     LlmUnavailableError,
+    config_errors,
     configured_providers,
     default_provider,
+    provider_label,
+    providers,
     stream_chat,
 )
+from tests.helpers import make_temp_dir, remove_temp_dir
 
-CLEAN = {name: "" for name in ("GEMINI_API_KEY", "OPENAI_API_KEY", "OPENAI_BASE_URL",
-                               "OPENAI_MODEL", "LLM_PROVIDER")}
+CLEAN = {name: "" for name in (
+    "GEMINI_API_KEY", "OPENAI_API_KEY", "OPENAI_BASE_URL", "OPENAI_MODEL", "LLM_PROVIDER",
+    "ANTHROPIC_API_KEY", "CLAUDE_MODEL", "DEEPSEEK_API_KEY", "OPENROUTER_API_KEY",
+)}
+# Без файла настроек: список задают только встроенные варианты
+CLEAN["LLM_CONFIG"] = os.path.join(os.path.dirname(__file__), "нет-такого-llm.json")
 
 
 class FakeChat(BaseHTTPRequestHandler):
@@ -60,6 +68,7 @@ class ProviderTests(unittest.TestCase):
         with patch.dict(os.environ, env):
             self.assertEqual(configured_providers(), ["gemini", "openai"])
             self.assertEqual(default_provider(), "gemini")
+            self.assertEqual(provider_label("openai"), "OpenAI-совместимый · gpt-4o-mini")
         with patch.dict(os.environ, {**env, "LLM_PROVIDER": "OpenAI"}):
             self.assertEqual(default_provider(), "openai")
 
@@ -67,6 +76,39 @@ class ProviderTests(unittest.TestCase):
         with patch.dict(os.environ, CLEAN):
             self.assertEqual(configured_providers({"openai": "k"}), ["openai"])
             self.assertEqual(default_provider({"gemini": "k"}), "gemini")
+            self.assertEqual(configured_providers({"claude": "k", "deepseek": "k"}),
+                             ["claude", "deepseek"])
+
+    def test_builtin_list(self):
+        with patch.dict(os.environ, CLEAN):
+            registry = providers()
+        self.assertEqual(list(registry), ["gemini", "claude", "openai", "deepseek", "openrouter"])
+        self.assertEqual(registry["openai"].name, "ChatGPT")
+        self.assertEqual(registry["claude"].label, "Claude · claude-opus-5-5")
+
+    def test_config_file(self):
+        tmp = make_temp_dir("llm-")
+        self.addCleanup(remove_temp_dir, tmp)
+        path = os.path.join(tmp, "llm.json")
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump({"providers": [
+                {"id": "ollama", "name": "Ollama", "type": "openai",
+                 "base_url": "http://localhost:11434/v1", "model": "llama3.1"},
+                {"id": "gemini-pro", "name": "Gemini Pro", "type": "gemini",
+                 "model": "gemini-3.8-pro", "api_key_env": "GEMINI_API_KEY"},
+                {"id": "Плохой", "type": "openai", "base_url": "x", "model": "m"},
+                {"id": "nourl", "type": "openai", "base_url": "ftp://x", "model": "m"},
+            ]}, handle)
+        with patch.dict(os.environ, {**CLEAN, "LLM_CONFIG": path, "GEMINI_API_KEY": "g"}):
+            registry = providers()
+            self.assertEqual(registry["ollama"].base_url, "http://localhost:11434/v1")
+            self.assertFalse(registry["ollama"].key_required)
+            self.assertEqual(registry["gemini-pro"].base_url, llm_explain.GEMINI_URL)
+            self.assertEqual(configured_providers(), ["gemini", "ollama", "gemini-pro"])
+            errors = config_errors()
+        self.assertEqual(len(errors), 2)
+        self.assertIn("id", errors[0])
+        self.assertIn("base_url", errors[1])
 
     def test_unconfigured_provider_is_rejected(self):
         with patch.dict(os.environ, CLEAN), self.assertRaises(LlmUnavailableError):
@@ -113,7 +155,7 @@ class OpenAiStreamTests(unittest.TestCase):
 
         chunks = []
         with patch.dict(os.environ, self.env), \
-                patch.object(llm_explain, "_openai_stream", broken), \
+                patch.dict(llm_explain.STREAMS, {"openai": broken}), \
                 self.assertRaises(LlmUnavailableError):
             for chunk in stream_chat("openai", [{"role": "user", "content": "x"}]):
                 chunks.append(chunk)
@@ -129,7 +171,7 @@ class OpenAiStreamTests(unittest.TestCase):
             yield "ок"
 
         with patch.dict(os.environ, self.env), \
-                patch.object(llm_explain, "_openai_stream", flaky), \
+                patch.dict(llm_explain.STREAMS, {"openai": flaky}), \
                 patch.object(llm_explain.time, "sleep"):
             text = "".join(stream_chat("openai", [{"role": "user", "content": "x"}]))
         self.assertEqual((text, len(attempts)), ("ок", 2))
@@ -202,3 +244,63 @@ class GeminiStreamTests(unittest.TestCase):
         self.assertNotIn("key=", path)
         self.assertEqual([c["role"] for c in body["contents"]], ["user", "model", "user"])
         self.assertEqual(body["systemInstruction"], {"parts": [{"text": "роль"}]})
+
+
+class FakeAnthropicStream:
+    def __init__(self, chunks, stop_reason):
+        self.text_stream = iter(chunks)
+        self.stop_reason = stop_reason
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def get_final_message(self):
+        return type("Message", (), {"stop_reason": self.stop_reason})()
+
+
+class ClaudeStreamTests(unittest.TestCase):
+    """Claude через SDK anthropic: параметры запроса и отказ модели (без сети)."""
+
+    def run_claude(self, chunks=("При", "вет"), stop_reason="end_turn", model=""):
+        calls = []
+
+        class FakeClient:
+            def __init__(self, **kwargs):
+                calls.append(("client", kwargs))
+                outer = self
+
+                class Messages:
+                    def stream(self, **params):
+                        calls.append(("stream", params))
+                        return FakeAnthropicStream(chunks, stop_reason)
+
+                outer.beta = type("Beta", (), {"messages": Messages()})()
+
+        env = {**CLEAN, "ANTHROPIC_API_KEY": "env-key", "CLAUDE_MODEL": model}
+        messages = [{"role": "user", "content": "вопрос"}]
+        with patch.dict(os.environ, env), patch("anthropic.Anthropic", FakeClient):
+            text = "".join(stream_chat("claude", messages, system="роль", api_key="ui-key"))
+        return text, dict(calls)
+
+    def test_stream_and_params(self):
+        text, calls = self.run_claude()
+        self.assertEqual(text, "Привет")
+        self.assertEqual(calls["client"]["api_key"], "ui-key")
+        self.assertEqual(calls["client"]["max_retries"], 0)
+        params = calls["stream"]
+        self.assertEqual(params["model"], "claude-opus-5-5")
+        self.assertEqual(params["system"], "роль")
+        self.assertEqual(params["fallbacks"], "default")
+        self.assertEqual(params["betas"], ["server-side-fallback-2026-07-01"])
+
+    def test_no_fallback_for_other_models(self):
+        _, calls = self.run_claude(model="claude-haiku-5-5")
+        self.assertNotIn("fallbacks", calls["stream"])
+
+    def test_refusal_is_an_error(self):
+        with self.assertRaises(LlmUnavailableError) as raised:
+            self.run_claude(chunks=(), stop_reason="refusal")
+        self.assertIn("отказалась", str(raised.exception))
