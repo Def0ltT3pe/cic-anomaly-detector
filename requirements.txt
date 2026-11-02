@@ -4,7 +4,7 @@ pandas>=2.2,<4
 numpy>=1.26,<3
 scikit-learn>=1.4,<2
 joblib>=1.3,<2
-streamlit>=1.36,<2
+streamlit>=1.50,<2
 # Без pyarrow pandas не умеет read_parquet — в контейнере это критично.
 pyarrow>=15,<22
 # Claude (пояснения ИИ). Необязателен для самой детекции.

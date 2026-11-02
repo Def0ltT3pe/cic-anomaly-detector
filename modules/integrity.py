@@ -5,7 +5,7 @@ SHA-256 защищает от случайной подмены/поврежде
 самих хэшей: приватный ключ хранится вне образа (keys/), в приложении лежит
 только публичный (trust/model_public_key.pem).
 
-Если публичный ключ есть, а `checksums.json` не подписан — загрузка
+Если публичный ключ есть, а `checksums.json` не подписан или его нет — загрузка
 блокируется (ALLOW_UNSIGNED_MODELS=1 отключает это требование).
 VERIFY_MODEL_CHECKSUMS=0 полностью отключает проверку.
 """
@@ -248,10 +248,21 @@ def _verification_disabled() -> bool:
     return os.environ.get("VERIFY_MODEL_CHECKSUMS", "1").strip() == "0"
 
 
+def _unsigned_allowed() -> bool:
+    return os.environ.get("ALLOW_UNSIGNED_MODELS", "0").strip() == "1"
+
+
 def _load_trusted_payload(model_dir: str) -> dict | None:
-    """Читает checksums.json и проверяет подпись. None, если файла нет."""
+    """Читает checksums.json и проверяет подпись. None, если файла нет и подпись не требуется."""
     checksums_path = os.path.join(model_dir, CHECKSUMS_FILE)
+    public_path = public_key_path()
     if not os.path.isfile(checksums_path):
+        # Иначе подпись обходится удалением checksums.json, а .pkl исполняет код
+        if os.path.isfile(public_path) and not _unsigned_allowed():
+            raise IntegrityError(
+                f"В {model_dir} нет {CHECKSUMS_FILE}, а публичный ключ есть. "
+                "Подпишите модели: python make_checksums.py"
+            )
         return None
 
     try:
@@ -261,7 +272,6 @@ def _load_trusted_payload(model_dir: str) -> dict | None:
     except (OSError, KeyError, TypeError, ValueError) as exc:
         raise IntegrityError(f"Не удалось прочитать {checksums_path}: {exc}") from exc
 
-    public_path = public_key_path()
     signature = payload.get("signature")
 
     if signature:
@@ -271,9 +281,7 @@ def _load_trusted_payload(model_dir: str) -> dict | None:
                 "Задайте MODEL_PUBLIC_KEY."
             )
         _verify_signature(payload, signature, public_path)
-    elif os.path.isfile(public_path) and os.environ.get(
-        "ALLOW_UNSIGNED_MODELS", "0"
-    ).strip() != "1":
+    elif os.path.isfile(public_path) and not _unsigned_allowed():
         raise IntegrityError(
             f"{CHECKSUMS_FILE} не подписан, а публичный ключ есть. "
             "Подпишите модели: python make_checksums.py"
