@@ -83,6 +83,12 @@ logger = logging.getLogger(__name__)
 
 MAX_ROWS = 2_000_000
 VIEWS = ("Обзор", "Инциденты", "Потоки", "Разбор потока")
+VIEW_ICONS = {
+    "Обзор": ":material/monitoring:",
+    "Инциденты": ":material/crisis_alert:",
+    "Потоки": ":material/table_rows:",
+    "Разбор потока": ":material/troubleshoot:",
+}
 TABLE_LIMIT = 1000
 TOP_FEATURES_CHART = 10
 PCAP_EXTENSIONS = (".pcap", ".pcapng", ".cap")
@@ -90,7 +96,7 @@ TABLE_EXTENSIONS = (".parquet", ".csv")
 
 st.set_page_config(
     page_title="Детектор аномалий трафика",
-    page_icon="🛰️",
+    page_icon=":material/radar:",
     layout="wide",
 )
 
@@ -246,7 +252,7 @@ def _init_state() -> None:
 
 
 def _render_audit_panel() -> None:
-    with st.sidebar.expander("Журнал аудита"):
+    with st.expander("Журнал аудита"):
         entries = read_recent(20)
         if not entries:
             st.caption("Пока пусто")
@@ -272,15 +278,16 @@ def _render_identity() -> None:
     if not user:
         return
 
-    st.sidebar.markdown(f"**{user}** · `{role}`")
+    _group_title(":material/account_circle:", "Аккаунт")
+    st.markdown(f"**{user}**, роль `{role}`")
     if st.session_state.get("auth_mode") == "open":
-        st.sidebar.warning(
+        st.warning(
             "Аутентификация не настроена. Добавьте пользователя "
             "(`python manage_users.py add admin --role admin`) "
             "или задайте APP_PASSWORD."
         )
 
-    if st.sidebar.button("Выйти", key="logout"):
+    if st.button("Выйти", key="logout", icon=":material/logout:"):
         log_event(user, role, "logout")
         for key in (
             "user",
@@ -603,18 +610,19 @@ def _jump_on_select(event, table: pd.DataFrame, key: str, column: str = "#") -> 
 
 def _render_overview(result: DetectionResult, brute, brute_probs, brute_mask, incidents) -> None:
     cols = st.columns(5)
-    cols[0].metric("Потоков", f"{result.total:,}")
+    cols[0].metric("Потоков", f"{result.total:,}", border=True)
     cols[1].metric("Аномалий IF", f"{result.n_anomalies:,}",
-                   help=f"IsolationForest: {result.share:.2%} потоков")
+                   help=f"IsolationForest: {result.share:.2%} потоков", border=True)
     if brute_mask is not None:
         cols[2].metric("Тревог", f"{int(brute_mask.sum()):,}",
                        help=f"{brute.display_name}: порог {brute.threshold:.3f}, FPR ≈ "
-                            f"{float(brute.metadata.get('target_fpr', 0)):.2%}")
-        cols[3].metric("Инцидентов", "—" if incidents is None else f"{len(incidents):,}")
+                            f"{float(brute.metadata.get('target_fpr', 0)):.2%}", border=True)
+        cols[3].metric("Инцидентов", "—" if incidents is None else f"{len(incidents):,}",
+                       border=True)
         cols[4].metric("Адресов", "—" if incidents is None else f"{incident_peers(incidents):,}",
-                       help="Внешние адреса, от которых есть инциденты")
+                       help="Внешние адреса, от которых есть инциденты", border=True)
     else:
-        cols[2].metric("Классификатор атак", "нет модели")
+        cols[2].metric("Классификатор атак", "нет модели", border=True)
 
     if result.info.get("inf_replaced") or result.info.get("nan_filled"):
         st.caption(
@@ -757,8 +765,12 @@ def _render_analysis(
     pending = st.session_state.pop("goto_view", None)
     if pending is not None:
         st.session_state.view = pending  # до создания переключателя вкладок
-    view = st.radio("Раздел", VIEWS, horizontal=True, key="view", label_visibility="collapsed")
-    st.divider()
+    elif st.session_state.get("view") not in VIEWS:
+        st.session_state.view = VIEWS[0]
+    view = st.segmented_control(
+        "Раздел", VIEWS, key="view", required=True, label_visibility="collapsed",
+        format_func=lambda name: f"{VIEW_ICONS[name]} {name}",
+    )
     if view == "Обзор":
         _render_overview(result, brute, brute_probs, brute_mask, incidents)
     elif view == "Инциденты":
@@ -781,7 +793,7 @@ def _render_llm_keys(user, role, registry) -> dict:
     """Ключ API из интерфейса: только в памяти этой сессии, не на диске и не в аудите."""
     keys = st.session_state.llm_keys
     keyed = [p.id for p in registry.values() if p.key_required or p.key_env]
-    with st.sidebar.expander("Ключ API для ИИ", expanded=not configured_providers(keys)):
+    with st.expander("Ключ API", expanded=not configured_providers(keys)):
         with st.form("llm_key_form", clear_on_submit=True):
             name = st.selectbox("Провайдер", keyed, format_func=lambda i: registry[i].name)
             key = st.text_input("Ключ", type="password")
@@ -806,26 +818,27 @@ def _render_llm_keys(user, role, registry) -> dict:
 
 def _select_llm_provider(user, role) -> str | None:
     """LLM для разбора потоков: по умолчанию LLM_PROVIDER, выбор — на сессию."""
+    _group_title(":material/smart_toy:", "ИИ")
     if not can_use_llm(role):
-        st.sidebar.caption("ИИ: недоступен для роли viewer")
+        st.caption("Недоступен для роли viewer")
         return None
     registry = providers()
     for problem in config_errors():
-        st.sidebar.warning(f"config/llm.json: {problem}")
+        st.warning(f"config/llm.json: {problem}")
     keys = _render_llm_keys(user, role, registry)
     ready = configured_providers(keys)
     # В списке все варианты; без ключа — с пометкой, ключ вводится выше
     options = ready + [i for i in registry if i not in ready]
     current = st.session_state.llm_provider or default_provider(keys) or options[0]
-    provider = st.sidebar.selectbox(
+    provider = st.selectbox(
         "LLM для разбора",
         options,
         index=options.index(current) if current in options else 0,
         format_func=lambda i: provider_label(i) + ("" if i in ready else " — нужен ключ"),
     )
     if provider not in ready:
-        st.sidebar.caption(
-            f"Для «{registry[provider].name}» введите ключ в «Ключ API для ИИ»"
+        st.caption(
+            f"Для «{registry[provider].name}» введите ключ в «Ключ API»"
             + (f" или задайте {registry[provider].key_env}" if registry[provider].key_env else "")
             + "."
         )
@@ -838,7 +851,7 @@ def _select_model(user, role) -> ModelEntry | None:
     try:
         entries = list_models()
     except OSError as exc:
-        st.sidebar.warning(f"Не удалось прочитать список моделей: {exc}")
+        st.warning(f"Не удалось прочитать список моделей: {exc}")
         entries = []
     if not entries:
         return None
@@ -846,8 +859,8 @@ def _select_model(user, role) -> ModelEntry | None:
     paths = [entry.path for entry in entries]
     current = st.session_state.model_dir
     index = paths.index(current) if current in paths else 0
-    entry = st.sidebar.selectbox(
-        "Модель",
+    entry = st.selectbox(
+        "Какую модель применять",
         entries,
         index=index,
         format_func=lambda item: item.label,
@@ -884,7 +897,7 @@ def _evaluation_rows(metadata: dict) -> tuple[str, list[dict]]:
 
 def _render_model_card(entry: ModelEntry) -> None:
     metadata = entry.metadata
-    with st.sidebar.expander("О модели"):
+    with st.expander("О модели"):
         st.caption(f"`{entry.name}`")
         if not metadata:
             st.caption("metadata.json нет.")
@@ -907,25 +920,25 @@ def _render_model_card(entry: ModelEntry) -> None:
 
 
 def _render_model_status(entry: ModelEntry | None, assets: Assets, user, role) -> None:
-    st.sidebar.success("✅ Модель и статистики загружены")
+    st.caption(":green[:material/check_circle:] Модель и статистики загружены")
     if entry is not None:
         _render_model_card(entry)
     for message in assets.errors:
-        st.sidebar.warning(f"⚠️ {message}")
+        st.warning(message, icon=":material/warning:")
         log_event(user, role, "model_warning", message=message)
-    st.sidebar.caption(f"Признаков: {len(assets.feature_cols)}")
+    st.caption(f"Признаков: {len(assets.feature_cols)}")
     calibration = assets.calibration
     if calibration is not None:
-        st.sidebar.caption(
+        st.caption(
             f"Порог: score ≤ {calibration.threshold:.4f} "
             f"(целевой FPR ≈ {calibration.target_fpr:.1%})"
         )
     else:
-        st.sidebar.caption("Порог: встроенный (contamination модели)")
+        st.caption("Порог: встроенный (contamination модели)")
     if calibration is not None and calibration.source == "target network holdout":
-        st.sidebar.caption("Модель адаптирована под целевую сеть (adapt_model.py)")
+        st.caption("Модель адаптирована под целевую сеть (adapt_model.py)")
     brute = assets.brute
-    st.sidebar.caption(
+    st.caption(
         (f"{brute.display_name}: supervised" if brute is not None else "Supervised: нет модели")
     )
 
@@ -933,12 +946,15 @@ def _render_model_status(entry: ModelEntry | None, assets: Assets, user, role) -
 def _handle_upload(user, role) -> tuple[pd.DataFrame, str] | None:
     """Загрузка файлов: таблица и имена файлов, или None, если анализировать нечего."""
     uploaded = st.file_uploader(
-        "📂 Загрузите файлы (pcap, pcapng, Parquet или CSV)",
+        "Файлы с трафиком: pcap, pcapng, Parquet или CSV",
         type=list(PCAP_EXTENSIONS + TABLE_EXTENSIONS),
         accept_multiple_files=True,
     )
     if not uploaded:
-        st.info("Файл не загружен.")
+        st.caption(
+            "Можно выбрать несколько файлов сразу: они объединятся в одну таблицу. "
+            "После загрузки появится кнопка «Анализировать»."
+        )
         return None
 
     file_id = tuple(
@@ -1016,36 +1032,56 @@ def _run_analysis(df: pd.DataFrame, assets: Assets, user, role) -> None:
     )
 
 
+def _group_title(icon: str, title: str) -> None:
+    """Заголовок блока боковой панели."""
+    st.markdown(f"**{icon} {title}**")
+
+
+def _render_header(entry: ModelEntry | None) -> None:
+    st.title(":primary[:material/radar:] Детектор аномалий трафика")
+    st.caption(
+        "Ищет необычные потоки и атаки в захватах трафика. Загрузите pcap/pcapng "
+        "(потоки посчитает tshark) или CSV/Parquet с признаками CICFlowMeter."
+        + (f" Модель: {entry.label}." if entry is not None else "")
+    )
+
+
 def main() -> None:
     _init_state()
     _login_screen()
-    _render_identity()
+
+    # Блоки боковой панели создаются заранее: аккаунт внизу, но выход
+    # доступен, даже если модель не загрузилась
+    model_box = st.sidebar.container(border=True)
+    ai_box = st.sidebar.container(border=True)
+    account_box = st.sidebar.container(border=True)
+    with account_box:
+        _render_identity()
 
     user = st.session_state.get("user")
     role = st.session_state.get("role")
 
-    entry = _select_model(user, role)
-    model_dir = entry.path if entry is not None else resolve_model_dir()
-    try:
-        assets = _load_assets(model_dir)
-    except ModelLoadError as exc:
-        log_event(user, role, "model_error", message=str(exc))
-        st.sidebar.error(f"❌ {exc}")
-        st.stop()
-    except Exception as exc:
-        logger.exception("Не удалось загрузить модель")
-        log_event(user, role, "model_error", message=str(exc))
-        st.sidebar.error(f"❌ Не удалось загрузить модель: {exc}")
-        st.stop()
+    with model_box:
+        _group_title(":material/model_training:", "Модель")
+        entry = _select_model(user, role)
+        model_dir = entry.path if entry is not None else resolve_model_dir()
+        try:
+            assets = _load_assets(model_dir)
+        except ModelLoadError as exc:
+            log_event(user, role, "model_error", message=str(exc))
+            st.error(str(exc), icon=":material/error:")
+            st.stop()
+        except Exception as exc:
+            logger.exception("Не удалось загрузить модель")
+            log_event(user, role, "model_error", message=str(exc))
+            st.error(f"Не удалось загрузить модель: {exc}", icon=":material/error:")
+            st.stop()
+        _render_model_status(entry, assets, user, role)
 
-    _render_model_status(entry, assets, user, role)
-    provider = _select_llm_provider(user, role)
+    with ai_box:
+        provider = _select_llm_provider(user, role)
 
-    st.title("Анализатор аномалий сетевого трафика")
-    st.caption(
-        "Загрузите захват pcap/pcapng (потоки посчитает tshark) или CSV/Parquet "
-        "с теми же признаками, что использовались при обучении."
-    )
+    _render_header(entry)
     upload = _handle_upload(user, role)
     if upload is None:
         return
@@ -1061,7 +1097,7 @@ def main() -> None:
             help="Потоки из pcap: в следующий раз можно загрузить их без конвертации",
         )
 
-    if st.button("Анализировать", type="primary"):
+    if st.button("Анализировать", type="primary", icon=":material/play_arrow:"):
         _run_analysis(df, assets, user, role)
 
     result = st.session_state.analysis
