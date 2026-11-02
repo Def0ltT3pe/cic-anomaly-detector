@@ -1,0 +1,14 @@
+[
+  {
+    "name": "serverA",
+    "target": "root@SERVER_A_ADDRESS",
+    "remote": "/var/lib/cic-capture",
+    "local": "D:\\captures\\serverA"
+  },
+  {
+    "name": "serverB",
+    "target": "root@SERVER_B_ADDRESS",
+    "remote": "/var/lib/cic-capture",
+    "local": "D:\\captures\\serverB"
+  }
+]
