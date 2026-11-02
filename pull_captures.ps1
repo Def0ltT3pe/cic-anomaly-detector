@@ -80,19 +80,18 @@ find . -type f \( $names \) -printf '%P\t%s\t%T@\n'
     return Invoke-Remote $Server.target $script
 }
 
-function Resolve-LocalPath([string]$LocalRoot, [string]$RelativePath) {
-    <# Путь из списка сервера -> локальный внутри LocalRoot; $null, если путь
-       выходит за LocalRoot или имя не похоже на файл сбора. Список присылает
-       сервер, а взломанный сервер может прислать «..\..\Startup\x.cmd». #>
-    if ([string]::IsNullOrWhiteSpace($RelativePath) -or $RelativePath -match '^[/\\]|:|(^|[/\\])\.\.([/\\]|$)') {
-        return $null
-    }
-    $leaf = Split-Path $RelativePath -Leaf
-    if (-not ($Patterns | Where-Object { $leaf -like $_ })) { return $null }
+function Test-ListedPath([string]$Path, [string]$LocalRoot) {
+    <# Путь из списка сервера: только «папка/файл» из безопасных символов, без
+       «..», имя по $Patterns, и после сборки он остаётся внутри $LocalRoot.
+       Иначе взломанный сервер мог бы записать файл куда угодно на этом диске
+       (например, подменить сам скрипт, который планировщик запускает сам). #>
+    if ($Path -notmatch '^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*$') { return $false }
+    if (@($Path.Split('/') | Where-Object { $_ -eq '.' -or $_ -eq '..' }).Count) { return $false }
+    $leaf = $Path.Split('/')[-1]
+    if (-not @($Patterns | Where-Object { $leaf -like $_ }).Count) { return $false }
     $root = [IO.Path]::GetFullPath($LocalRoot).TrimEnd('\') + '\'
-    $full = [IO.Path]::GetFullPath((Join-Path $LocalRoot ($RelativePath -replace '/', '\')))
-    if (-not $full.StartsWith($root, [StringComparison]::OrdinalIgnoreCase)) { return $null }
-    return $full
+    $full = [IO.Path]::GetFullPath((Join-Path $LocalRoot ($Path -replace '/', '\')))
+    return $full.StartsWith($root, [StringComparison]::OrdinalIgnoreCase)
 }
 
 function Get-PullPlan([string[]]$Listing, [string]$LocalRoot) {
@@ -103,6 +102,10 @@ function Get-PullPlan([string[]]$Listing, [string]$LocalRoot) {
         $parts = "$line".Split("`t")
         if ($parts[0] -eq 'NOW') { $now = [double]$parts[1]; continue }
         if ($parts.Count -ne 3) { continue }
+        if (-not (Test-ListedPath $parts[0] $LocalRoot)) {
+            Write-Log "  ПРОПУСК подозрительного пути от сервера: $($parts[0])"
+            continue
+        }
         $files += [pscustomobject]@{
             Path  = $parts[0]
             Size  = [int64]$parts[1]
@@ -120,11 +123,7 @@ function Get-PullPlan([string[]]$Listing, [string]$LocalRoot) {
         }
 
     foreach ($file in $files) {
-        $local = Resolve-LocalPath $LocalRoot $file.Path
-        if (-not $local) {
-            Write-Log "  пропуск (недопустимый путь от сервера): $($file.Path)"
-            continue
-        }
+        $local = Join-Path $LocalRoot ($file.Path -replace '/', '\')
         $leaf = Split-Path $file.Path -Leaf
         $reason = $null
         if ($active.ContainsKey($file.Path)) {
