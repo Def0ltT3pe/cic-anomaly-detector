@@ -17,6 +17,7 @@ data
 REVIEW.md
 keys
 config/users.json
+config/llm.json
 audit
 # адреса серверов для pull_captures.ps1 и временные файлы тестов
 pull_captures.json

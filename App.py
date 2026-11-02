@@ -46,11 +46,12 @@ from modules.flow_report import (
     without_images,
 )
 from modules.llm_explain import (
-    PROVIDERS,
     LlmUnavailableError,
+    config_errors,
     configured_providers,
     default_provider,
     provider_label,
+    providers,
     stream_chat,
 )
 from modules.model_catalog import ModelEntry, list_models
@@ -606,12 +607,13 @@ def _reset_analysis() -> None:
     st.session_state.brute = None
 
 
-def _render_llm_keys(user, role) -> dict:
+def _render_llm_keys(user, role, registry) -> dict:
     """Ключ API из интерфейса: только в памяти этой сессии, не на диске и не в аудите."""
     keys = st.session_state.llm_keys
+    keyed = [p.id for p in registry.values() if p.key_required or p.key_env]
     with st.sidebar.expander("Ключ API для ИИ", expanded=not configured_providers(keys)):
         with st.form("llm_key_form", clear_on_submit=True):
-            name = st.selectbox("Провайдер", list(PROVIDERS), format_func=PROVIDERS.get)
+            name = st.selectbox("Провайдер", keyed, format_func=lambda i: registry[i].name)
             key = st.text_input("Ключ", type="password")
             saved = st.form_submit_button("Сохранить на эту сессию")
         if saved and key.strip():
@@ -619,14 +621,15 @@ def _render_llm_keys(user, role) -> dict:
             st.session_state.llm_provider = name
             log_event(user, role, "llm_key_set", provider=name)  # без самого ключа
         for name in keys:
-            st.caption(f"{PROVIDERS[name]}: ключ введён")
+            if name in registry:
+                st.caption(f"{registry[name].name}: ключ введён")
         if keys and st.button("Забыть ключи", key="llm_keys_clear"):
             keys.clear()
             log_event(user, role, "llm_key_clear")
             st.rerun()
         st.caption(
             "Ключ хранится только в памяти этой сессии и пропадает при выходе. "
-            "Адрес OpenAI-совместимого API — OPENAI_BASE_URL (по умолчанию OpenAI)."
+            "Адреса и модели — в config/llm.json и переменных окружения."
         )
     return keys
 
@@ -636,18 +639,26 @@ def _select_llm_provider(user, role) -> str | None:
     if not can_use_llm(role):
         st.sidebar.caption("ИИ: недоступен для роли viewer")
         return None
-    keys = _render_llm_keys(user, role)
-    providers = configured_providers(keys)
-    if not providers:
-        st.sidebar.caption("ИИ: не настроен — введите ключ выше или задайте GEMINI_API_KEY / OPENAI_API_KEY")
-        return None
-    current = st.session_state.llm_provider or default_provider(keys)
+    registry = providers()
+    for problem in config_errors():
+        st.sidebar.warning(f"config/llm.json: {problem}")
+    keys = _render_llm_keys(user, role, registry)
+    ready = configured_providers(keys)
+    # В списке все варианты; без ключа — с пометкой, ключ вводится выше
+    options = ready + [i for i in registry if i not in ready]
+    current = st.session_state.llm_provider or default_provider(keys) or options[0]
     provider = st.sidebar.selectbox(
         "LLM для разбора",
-        providers,
-        index=providers.index(current) if current in providers else 0,
-        format_func=provider_label,
+        options,
+        index=options.index(current) if current in options else 0,
+        format_func=lambda i: provider_label(i) + ("" if i in ready else " — нужен ключ"),
     )
+    if provider not in ready:
+        st.sidebar.caption(
+            f"Для «{registry[provider].name}» введите ключ в «Ключ API для ИИ»"
+            + (f" или задайте {registry[provider].key_env}" if registry[provider].key_env else "")
+            + "."
+        )
     st.session_state.llm_provider = provider
     return provider
 

@@ -18,6 +18,7 @@ REVIEW.md
 # приватный ключ подписи моделей и пользовательские данные
 keys/
 config/users.json
+config/llm.json
 audit/
 
 # адреса серверов для pull_captures.ps1
