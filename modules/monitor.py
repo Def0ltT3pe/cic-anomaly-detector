@@ -29,6 +29,7 @@ from datetime import datetime, timedelta, timezone
 import pandas as pd
 
 from modules.alerts import META_COLUMNS, aggregate_alerts, parse_trusted
+from modules.servers import NAME_RE
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEFAULT_STATE_DIR = os.path.join(BASE_DIR, "monitor")
@@ -72,6 +73,9 @@ def load_servers(config_path: str, trusted_env: str = "") -> list[Server]:
         local = str(entry.get("local") or "").strip()
         if not name or not local:
             raise ValueError(f"{config_path}: у сервера нужны name и local")
+        # Имя становится папкой истории (monitor/<имя>/): «..\x» вывело бы её наружу
+        if not NAME_RE.match(name):
+            raise ValueError(f"{config_path}: имя сервера {name!r} — только латиница, цифры, «-» и «_»")
         servers.append(Server(
             name=name,
             local=local,

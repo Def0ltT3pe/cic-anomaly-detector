@@ -1245,6 +1245,7 @@ def _render_server_card(entry, user, role) -> None:
             st.caption(f"{entry.remote} → {entry.local}")
         if buttons.button("Статус", key=f"server_status_{entry.name}", icon=":material/info:"):
             _server_action(entry, user, role, "status", lambda: srv.collector(entry, "status"))
+            st.rerun()  # метка выше уже нарисована со старым состоянием
         with buttons.popover("", icon=":material/more_vert:", help="Остановить или убрать из списка"):
             st.markdown(f"**Остановить сбор на {entry.name}**")
             st.caption("dumpcap остановится, последний кусок журнала SSH выгрузится. "
@@ -1266,9 +1267,16 @@ def _render_server_card(entry, user, role) -> None:
         if result is not None:
             kind, text = result
             if kind == "error":
-                st.error(text, icon=":material/error:")
+                _show_server_error(text)
             else:
                 st.code(text, language=None)
+
+
+def _show_server_error(text: str) -> None:
+    """Ошибка SSH. В тексте бывает вывод сервера, поэтому он показывается кодом:
+    как Markdown взломанный сервер мог бы вставить картинку-маячок или ссылку."""
+    st.error("Команда на сервере не выполнена.", icon=":material/error:")
+    st.code(text, language=None, wrap_lines=True)
 
 
 @st.dialog("Добавить сервер", width="large")
@@ -1311,6 +1319,10 @@ def _render_server_connect(configured, user, role) -> None:
         entry = srv.validate(name, user_name, host, remote, local or _default_local(configured, name.strip()))
         if any(item.name.lower() == entry.name.lower() or item.host == entry.host for item in configured):
             raise srv.ServerError("Сервер с таким именем или адресом уже в списке.")
+    except srv.ServerError as exc:
+        st.error(str(exc), icon=":material/error:")  # текст проверки, без вывода сервера
+        return
+    try:
         with st.status(f"Подключение к {entry.target}…", expanded=True) as status:
             key = srv.public_key(create=True)
             if password:
@@ -1327,8 +1339,8 @@ def _render_server_connect(configured, user, role) -> None:
             dumpcap = srv.has_dumpcap(entry)
             status.update(label=f"{entry.target}: подключено ({privileges})", state="complete")
     except srv.ServerError as exc:
-        log_event(user, role, "server_connect", host=host.strip(), ok=False)
-        st.error(str(exc), icon=":material/error:")
+        log_event(user, role, "server_connect", host=entry.host, ok=False)
+        _show_server_error(str(exc))
         return
     log_event(user, role, "server_connect", server=entry.name, host=entry.host, ok=True,
               by_password=bool(password))
@@ -1354,7 +1366,7 @@ def _render_server_start(pending: dict, user, role) -> None:
                     log_event(user, role, "server_install_tshark", server=entry.name, ok=True)
                 except srv.ServerError as exc:
                     log_event(user, role, "server_install_tshark", server=entry.name, ok=False)
-                    st.error(str(exc), icon=":material/error:")
+                    _show_server_error(str(exc))
                     return
                 st.rerun(scope="fragment")
             if st.button("Отмена", key="server_cancel_tshark"):
@@ -1388,7 +1400,7 @@ def _render_server_start(pending: dict, user, role) -> None:
                 srv.add_to_config(entry)
             except srv.ServerError as exc:
                 log_event(user, role, "server_add", server=entry.name, host=entry.host, ok=False)
-                st.error(str(exc), icon=":material/error:")
+                _show_server_error(str(exc))
                 return
             log_event(user, role, "server_add", server=entry.name, host=entry.host, ok=True,
                       duration=duration)
