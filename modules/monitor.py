@@ -37,6 +37,8 @@ CAPTURE_PATTERN = "capture_*.pcapng"
 STATE_FILE = "state.json"
 INCIDENTS_FILE = "incidents.parquet"
 FLAGGED_FILE = "flagged.parquet"
+HOURLY_FILE = "hourly.parquet"
+HOURLY_COLUMNS = ["file", "hour", "flows"]
 RETAIN_DAYS = 14
 # Больше новых инцидентов за прогон — одно сводное сообщение вместо потока
 MAX_SEPARATE_MESSAGES = 10
@@ -162,6 +164,34 @@ def merge_flagged(history: pd.DataFrame, new: pd.DataFrame, retain_days: float =
     return merged[merged["Timestamp"] >= cutoff].reset_index(drop=True)
 
 
+def hourly_counts(flows: pd.DataFrame) -> pd.DataFrame:
+    """Все потоки файла по часам (час, потоков) — знаменатель для доли тревог."""
+    stamps = pd.to_datetime(flows["Timestamp"], errors="coerce").dropna()
+    counts = stamps.dt.floor("h").value_counts().sort_index()
+    return pd.DataFrame({"hour": counts.index, "flows": counts.to_numpy(dtype="int64")})
+
+
+def load_hourly(directory: str, name: str) -> pd.DataFrame:
+    path = os.path.join(directory, name, HOURLY_FILE)
+    if not os.path.isfile(path):
+        return pd.DataFrame(columns=HOURLY_COLUMNS)
+    return pd.read_parquet(path)
+
+
+def merge_hourly(history: pd.DataFrame, new: dict, retain_days: float = RETAIN_DAYS) -> pd.DataFrame:
+    """Счётчики по файлам: файл, скачанный заново, заменяет свои строки, а не
+    добавляется второй раз."""
+    frames = [history[~history["file"].isin(new)]] if len(history) else []
+    frames += [counts.assign(file=key)[HOURLY_COLUMNS] for key, counts in new.items() if len(counts)]
+    frames = [frame for frame in frames if len(frame)]
+    if not frames:
+        return pd.DataFrame(columns=HOURLY_COLUMNS)
+    merged = pd.concat(frames, ignore_index=True)
+    merged["hour"] = pd.to_datetime(merged["hour"])
+    cutoff = merged["hour"].max() - pd.Timedelta(days=retain_days)
+    return merged[merged["hour"] >= cutoff].sort_values("hour", kind="stable").reset_index(drop=True)
+
+
 def server_incidents(server: Server, flagged: pd.DataFrame, local_ip: str | None) -> pd.DataFrame:
     if not len(flagged) or not local_ip:
         return pd.DataFrame(columns=INCIDENT_COLUMNS)
@@ -219,7 +249,7 @@ def run(
     """Один прогон по всем серверам.
 
     analyze(path, server) -> (тревожные потоки с колонками FLAGGED_COLUMNS,
-    адрес сервера); notify(text) отправляет сообщение или бросает исключение;
+    адрес сервера[, все потоки по часам — hourly_counts]); notify(text) отправляет сообщение или бросает исключение;
     None — не отправлять (новые инциденты останутся неотправленными).
     """
     directory = directory or state_dir()
@@ -242,10 +272,11 @@ def run(
                     f"не проверяется ({skipped} файлов)")
         flagged = load_flagged(directory, server)
         new_frames = []
+        new_hourly = {}
         for path in pending_captures(server, state):
             key = _capture_key(server, path)
             try:
-                rows, local_ip = analyze(path, server)
+                rows, local_ip, *rest = analyze(path, server)
             except Exception as exc:  # битый файл не должен останавливать остальные
                 summary.errors.append(f"{key}: {exc}")
                 log(f"{key}: ошибка — {exc}")
@@ -253,6 +284,8 @@ def run(
             if local_ip:
                 state["local_ip"][server.name] = local_ip
             new_frames.append(rows)
+            if rest and rest[0] is not None:
+                new_hourly[key] = rest[0]
             state["processed"][key] = os.path.getsize(path)
             summary.files += 1
             summary.flagged += len(rows)
@@ -261,6 +294,9 @@ def run(
             flagged = merge_flagged(flagged, pd.concat(new_frames, ignore_index=True))
             os.makedirs(os.path.join(directory, server.name), exist_ok=True)
             flagged.to_parquet(_flagged_path(directory, server), index=False)
+        if new_hourly:
+            hourly = merge_hourly(load_hourly(directory, server.name), new_hourly)
+            hourly.to_parquet(os.path.join(directory, server.name, HOURLY_FILE), index=False)
         all_incidents.append(server_incidents(server, flagged, state["local_ip"].get(server.name)))
 
     frames = [frame for frame in all_incidents if len(frame)]
@@ -315,3 +351,63 @@ def daily_counts(incidents: pd.DataFrame, days: int = RETAIN_DAYS, today=None) -
     index = pd.date_range(today - pd.Timedelta(days=days - 1), today, freq="D")
     counts = pd.to_datetime(incidents["window_start"]).dt.normalize().value_counts()
     return pd.DataFrame({"День": index, "Инцидентов": counts.reindex(index, fill_value=0).to_numpy()})
+
+
+# --- статистика сервера для приложения -----------------------------------------
+
+def server_traffic(directory: str, name: str) -> pd.DataFrame:
+    """По часам: всего потоков и тревожных (из истории monitor.py)."""
+    hourly = load_hourly(directory, name)
+    totals = (hourly.groupby(pd.to_datetime(hourly["hour"]))["flows"].sum()
+              if len(hourly) else pd.Series(dtype="int64"))
+    path = os.path.join(directory, name, FLAGGED_FILE)
+    flagged = pd.read_parquet(path) if os.path.isfile(path) else pd.DataFrame(columns=FLAGGED_COLUMNS)
+    alerts = (pd.to_datetime(flagged["Timestamp"]).dt.floor("h").value_counts()
+              if len(flagged) else pd.Series(dtype="int64"))
+    index = totals.index.union(alerts.index).sort_values()
+    return pd.DataFrame({
+        "Час": index,
+        "Потоков": totals.reindex(index, fill_value=0).to_numpy(dtype="int64"),
+        "Тревог": alerts.reindex(index, fill_value=0).to_numpy(dtype="int64"),
+    })
+
+
+def traffic_summary(traffic: pd.DataFrame, since) -> dict:
+    """Потоков, тревог и доля тревог с момента since."""
+    recent = traffic[traffic["Час"] >= pd.Timestamp(since)]
+    flows, alerts = int(recent["Потоков"].sum()), int(recent["Тревог"].sum())
+    return {"flows": flows, "alerts": alerts, "share": alerts / flows if flows else None}
+
+
+def top_attackers(incidents: pd.DataFrame, n: int = 10) -> pd.DataFrame:
+    """Адреса с инцидентами: сколько инцидентов и потоков, порты, когда в последний раз."""
+    if not len(incidents):
+        return pd.DataFrame(columns=["Адрес", "Инцидентов", "Потоков", "Порты", "Последний раз"])
+    grouped = incidents.groupby("peer").agg(
+        Инцидентов=("window_start", "count"),
+        Потоков=("flows", "sum"),
+        Порты=("services", lambda values: ", ".join(sorted(set(", ".join(values).split(", "))))),
+        Последний=("last_seen", "max"),
+    )
+    grouped = grouped.sort_values(["Инцидентов", "Потоков"], ascending=False).head(n)
+    return grouped.reset_index().rename(columns={"peer": "Адрес", "Последний": "Последний раз"})
+
+
+def attacked_ports(directory: str, name: str, local_ip: str | None, n: int = 10) -> pd.DataFrame:
+    """Порты сервера, на которые приходится больше всего тревог."""
+    path = os.path.join(directory, name, FLAGGED_FILE)
+    if not local_ip or not os.path.isfile(path):
+        return pd.DataFrame(columns=["Порт", "Тревог"])
+    flagged = pd.read_parquet(path)
+    outbound = flagged["Src IP"].astype(str) == local_ip
+    ports = flagged["Src Port"].where(outbound, flagged["Dst Port"]).astype(int)
+    counts = ports.value_counts().head(n)
+    return pd.DataFrame({"Порт": counts.index.astype(str), "Тревог": counts.to_numpy()})
+
+
+def last_download(local: str) -> datetime | None:
+    """Время самого свежего скачанного захвата (UTC) или None."""
+    found = glob.glob(os.path.join(glob.escape(local), "**", CAPTURE_PATTERN), recursive=True)
+    if not found:
+        return None
+    return datetime.fromtimestamp(max(os.path.getmtime(path) for path in found), timezone.utc)

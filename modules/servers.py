@@ -23,6 +23,7 @@ import shlex
 import shutil
 import subprocess
 from dataclasses import dataclass
+from datetime import datetime, timezone
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEFAULT_CONFIG = os.path.join(BASE_DIR, "pull_captures.json")
@@ -337,3 +338,77 @@ def check_all(entries: list[ServerEntry], runner=subprocess.run, workers: int = 
         return {}
     with ThreadPoolExecutor(max_workers=min(workers, len(entries))) as pool:
         return dict(pool.map(one, entries))
+
+
+# --- состояние сбора подробно: место, объём, сколько живёт файл в кольце ------
+
+SESSION_JSON_MARK = "--- session.json ---"
+SPAN_MARK = "--- capture mtimes ---"
+_SIZE_UNITS = {"K": 1 / 1024, "M": 1.0, "G": 1024.0, "T": 1024.0 * 1024}
+
+
+def _size_mb(text: str) -> float | None:
+    """Размер из `du -h` («1.2G», «640M») в МБ."""
+    match = re.match(r"^\s*([\d.,]+)\s*([KMGT])?", text or "")
+    if not match:
+        return None
+    return float(match.group(1).replace(",", ".")) * _SIZE_UNITS.get(match.group(2) or "M", 1.0)
+
+
+def collection_command(entry: ServerEntry) -> str:
+    """status и session.json последней сессии одним входом по SSH."""
+    show_session = (
+        f"d=$(ls -1d {shlex.quote(entry.remote)}/*/ 2>/dev/null | sort | tail -1); "
+        f'[ -n "$d" ] && echo {shlex.quote(SESSION_JSON_MARK)} && cat "$d/session.json" && '
+        f'echo {shlex.quote(SPAN_MARK)} && stat -c %Y "$d"/capture_*.pcapng 2>/dev/null | sort -n | sed -n "1p;\\$p"; true'
+    )
+    return (collector_command(entry, "status") + "; "
+            + _sudo(entry) + "sh -c " + shlex.quote(show_session))
+
+
+def parse_collection(output: str, now: datetime | None = None) -> dict:
+    """Вывод collection_command -> числа для статистики (None, где неизвестно).
+
+    ring_hours — сколько часов файл живёт в кольце до перезаписи при
+    нынешнем темпе: если это меньше интервала скачивания, часть захвата
+    пропадает, не дойдя до этого компьютера.
+    """
+    status, _, rest = output.partition(SESSION_JSON_MARK)
+    session_text, _, span_text = rest.partition(SPAN_MARK)
+    stats = {"state": collector_state(status), "files": None, "ssh_logs": None,
+             "used_mb": None, "free_mb": None, "started": None, "ring_mb": None,
+             "rate_mb_h": None, "ring_hours": None}
+    if match := re.search(r"Файлов захвата:\s*(\d+), журналов SSH:\s*(\d+)", status):
+        stats["files"], stats["ssh_logs"] = int(match.group(1)), int(match.group(2))
+    if match := re.search(r"Занято:\s*(\S+), свободно на диске:\s*(\d+)", status):
+        stats["used_mb"], stats["free_mb"] = _size_mb(match.group(1)), int(match.group(2))
+    try:
+        session = json.loads(session_text) if session_text.strip() else {}
+    except ValueError:
+        session = {}
+    if session.get("started_utc"):
+        try:
+            stats["started"] = datetime.strptime(session["started_utc"], "%Y-%m-%dT%H:%M:%SZ")
+        except ValueError:
+            pass
+    if session.get("ring_files") and session.get("file_mb"):
+        stats["ring_mb"] = float(session["ring_files"]) * float(session["file_mb"])
+    now = now or datetime.now(timezone.utc).replace(tzinfo=None)
+    ring_files = int(session.get("ring_files") or 0)
+    stamps = [int(value) for value in span_text.split() if value.isdigit()]
+    if ring_files and stats["files"] is not None and stats["files"] >= ring_files and len(stamps) == 2:
+        # Кольцо заполнено: файл живёт столько, сколько между старейшим и новейшим
+        stats["ring_hours"] = (stamps[1] - stamps[0]) / 3600 or None
+        if stats["ring_hours"] and stats["used_mb"]:
+            stats["rate_mb_h"] = stats["used_mb"] / stats["ring_hours"]
+    elif stats["started"] and stats["used_mb"]:
+        hours = (now - stats["started"]).total_seconds() / 3600
+        if hours > 0.1:  # пока кольцо не заполнилось, место растёт с темпом записи
+            stats["rate_mb_h"] = stats["used_mb"] / hours
+            if stats["ring_mb"]:
+                stats["ring_hours"] = stats["ring_mb"] / stats["rate_mb_h"]
+    return stats
+
+
+def collection_stats(entry: ServerEntry, runner=subprocess.run) -> dict:
+    return parse_collection(ssh_run(entry, collection_command(entry), runner=runner))

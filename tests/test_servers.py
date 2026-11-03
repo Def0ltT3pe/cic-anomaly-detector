@@ -16,6 +16,7 @@ from modules.servers import (
     check_key_login,
     collector,
     collector_state,
+    parse_collection,
     entry_from_config,
     install_collector,
     install_key_with_password,
@@ -237,6 +238,41 @@ class StateTests(unittest.TestCase):
         self.assertEqual(collector_state("Состояние:        идёт запись (dumpcap PID 42)"), "running")
         self.assertEqual(collector_state("Состояние:        запись не идёт"), "stopped")
         self.assertEqual(collector_state("Сессий в /var/lib/cic-capture нет."), "empty")
+
+    def test_parse_collection_full_ring(self):
+        output = "\n".join([
+            "Состояние:        идёт запись (dumpcap PID 7)",
+            "Файлов захвата:   3, журналов SSH: 2",
+            "Занято:           1.5G, свободно на диске: 9000 МБ",
+            "--- session.json ---",
+            '{"started_utc": "2026-11-01T10:00:00Z", "ring_files": 3, "file_mb": 500}',
+            "--- capture mtimes ---",
+            "1793520000",
+            "1793530800",
+        ])
+        stats = parse_collection(output)
+        self.assertEqual((stats["state"], stats["files"], stats["free_mb"]), ("running", 3, 9000))
+        self.assertEqual(stats["used_mb"], 1536.0)
+        self.assertEqual(stats["ring_hours"], 3.0)  # от старейшего файла до новейшего
+        self.assertAlmostEqual(stats["rate_mb_h"], 512.0)
+
+    def test_parse_collection_filling_ring(self):
+        from datetime import datetime
+        output = "\n".join([
+            "Состояние:        идёт запись (dumpcap PID 7)",
+            "Файлов захвата:   2, журналов SSH: 1",
+            "Занято:           200M, свободно на диске: 9000 МБ",
+            "--- session.json ---",
+            '{"started_utc": "2026-11-01T10:00:00Z", "ring_files": 10, "file_mb": 100}',
+        ])
+        stats = parse_collection(output, now=datetime(2026, 11, 1, 12, 0))
+        self.assertAlmostEqual(stats["rate_mb_h"], 100.0)
+        self.assertAlmostEqual(stats["ring_hours"], 10.0)  # 1000 МБ кольца / 100 МБ в час
+
+    def test_parse_collection_without_session(self):
+        stats = parse_collection("Сессий в /var/lib/cic-capture нет.")
+        self.assertEqual(stats["state"], "empty")
+        self.assertIsNone(stats["ring_hours"])
 
     def test_check_all_marks_unreachable(self):
         entries = [ServerEntry("ok", "root", "203.0.113.10"), ServerEntry("down", "root", "203.0.113.11")]

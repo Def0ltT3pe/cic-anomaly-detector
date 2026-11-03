@@ -12,6 +12,10 @@ from modules.monitor import (
     MAX_SEPARATE_MESSAGES,
     Server,
     daily_counts,
+    hourly_counts,
+    server_traffic,
+    top_attackers,
+    traffic_summary,
     load_incidents,
     load_servers,
     load_state,
@@ -152,6 +156,42 @@ class MonitorTests(unittest.TestCase):
             ["2026-11-03 10:00", "2026-11-03 18:00", "2026-11-01 02:00", "2026-10-01 02:00"])})
         counts = daily_counts(incidents, days=3, today="2026-11-03 23:00")
         self.assertEqual(list(counts["Инцидентов"]), [1, 0, 2])
+
+    def test_hourly_totals_and_share(self):
+        rows = flagged(("203.0.113.5", 22, "2026-11-01 10:05", 0.9))
+        all_flows = pd.DataFrame({"Timestamp": pd.to_datetime(
+            ["2026-11-01 10:01", "2026-11-01 10:30", "2026-11-01 10:50", "2026-11-01 11:10"])})
+        self.results["capture_1.pcapng"] = rows
+        path = self.capture("capture_1.pcapng", rows)
+        analyze = lambda p, server: (rows, SERVER_IP, hourly_counts(all_flows))
+        run([self.server], analyze, None, directory=self.state, log=lambda m: None)
+        # Файл скачан заново: его часы заменяются, а не удваиваются
+        with open(path, "ab") as handle:
+            handle.write(b"x")
+        run([self.server], analyze, None, directory=self.state, log=lambda m: None)
+        traffic = server_traffic(self.state, "serverA")
+        self.assertEqual(list(traffic["Потоков"]), [3, 1])
+        self.assertEqual(list(traffic["Тревог"]), [1, 0])
+        summary = traffic_summary(traffic, "2026-11-01 00:00")
+        self.assertEqual((summary["flows"], summary["alerts"]), (4, 1))
+        self.assertAlmostEqual(summary["share"], 0.25)
+
+    def test_old_analyzer_without_hourly_still_works(self):
+        self.capture("capture_1.pcapng", flagged(("203.0.113.5", 22, "2026-11-01 10:05", 0.9)))
+        self.assertEqual(self.run_once().files, 1)
+        self.assertEqual(list(server_traffic(self.state, "serverA")["Потоков"]), [0])
+
+    def test_top_attackers(self):
+        incidents = pd.DataFrame({
+            "peer": ["203.0.113.5", "203.0.113.5", "198.51.100.7"],
+            "window_start": pd.to_datetime(["2026-11-01 10:00", "2026-11-01 11:00", "2026-11-01 10:00"]),
+            "flows": [3, 4, 9], "services": ["22", "22, 443", "443"],
+            "last_seen": pd.to_datetime(["2026-11-01 10:50", "2026-11-01 11:20", "2026-11-01 10:40"]),
+        })
+        top = top_attackers(incidents)
+        self.assertEqual(list(top["Адрес"]), ["203.0.113.5", "198.51.100.7"])
+        self.assertEqual(top.iloc[0]["Порты"], "22, 443")
+        self.assertEqual(top.iloc[0]["Потоков"], 7)
 
     def test_merge_flagged_drops_old_rows(self):
         history = flagged(("203.0.113.5", 22, "2026-10-01 10:05", 0.9))
