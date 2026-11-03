@@ -54,9 +54,10 @@ from modules.llm_explain import (
     providers,
     stream_chat,
 )
-from modules.charts import deviation_chart, timeline_chart, top_chart
+from modules.charts import daily_chart, deviation_chart, timeline_chart, top_chart
 from modules.explainer import feature_deviations
 from modules.model_catalog import ModelEntry, list_models
+from modules.monitor import RETAIN_DAYS, daily_counts, load_incidents
 from modules.overview import (
     ANOMALY,
     ATTACK,
@@ -1091,6 +1092,81 @@ def main() -> None:
         provider = _select_llm_provider(user, role)
 
     _render_header(entry)
+    monitoring = load_incidents()
+    if monitoring is None:  # monitor.py не запускался (например, в Docker)
+        _render_file_analysis(assets, provider, user, role)
+        return
+    file_tab, monitor_tab = st.tabs(
+        [":material/upload_file: Анализ файла", ":material/monitor_heart: Мониторинг серверов"]
+    )
+    with monitor_tab:
+        _render_monitoring(*monitoring)
+    with file_tab:
+        _render_file_analysis(assets, provider, user, role)
+
+
+def _render_monitoring(incidents: pd.DataFrame, updated) -> None:
+    """Инциденты, которые monitor.py нашёл в захватах с серверов."""
+    age = pd.Timestamp.now(tz="UTC") - pd.Timestamp(updated)
+    st.caption(
+        f"Последняя проверка: {pd.Timestamp(updated).tz_convert(None):%d.%m.%Y %H:%M} UTC "
+        f"({_ago(age)}). Проверку запускает pull_captures.ps1 после скачивания; "
+        f"вручную — python monitor.py. Время инцидентов — UTC."
+    )
+    servers = sorted(incidents["server"].unique()) if len(incidents) else []
+    if len(servers) > 1:
+        server = st.segmented_control(
+            "Сервер", ["Все", *servers], default="Все", required=True,
+            key="monitor_server", label_visibility="collapsed",
+        )
+        if server != "Все":
+            incidents = incidents[incidents["server"] == server]
+
+    stamps = pd.to_datetime(incidents["window_start"])
+    day_ago = pd.Timestamp.now(tz="UTC").tz_convert(None) - pd.Timedelta(days=1)
+    cols = st.columns(4, gap="small")
+    cols[0].metric("За сутки", f"{int((stamps >= day_ago).sum()):,}", border=True)
+    cols[1].metric(f"За {RETAIN_DAYS} дней", f"{len(incidents):,}", border=True)
+    cols[2].metric("Адресов", f"{incidents['peer'].nunique():,}", border=True,
+                   help="Внешние адреса, от которых были инциденты")
+    pending = int((~incidents["notified"].astype(bool)).sum())
+    cols[3].metric("Не отправлено", f"{pending:,}", border=True,
+                   help="Инциденты, о которых ещё не ушло сообщение в Telegram: "
+                        "не настроен бот или не было сети. Уйдут при следующей проверке.")
+    if not len(incidents):
+        st.success(f"За {RETAIN_DAYS} дней инцидентов нет.")
+        return
+
+    st.markdown("##### Инциденты по дням")
+    st.altair_chart(daily_chart(daily_counts(incidents), _theme()), width="stretch")
+    view = incidents.sort_values("window_start", ascending=False).rename(columns={
+        "server": "Сервер", "window_start": "Час", "peer": "Адрес", "flows": "Потоков",
+        "services": "Порты сервера", "max_proba": "Макс. вероятность", "first_seen": "Первый",
+        "last_seen": "Последний", "reason": "Почему инцидент", "notified": "Отправлено",
+    })
+    st.dataframe(
+        view, hide_index=True,
+        column_config={
+            "Час": st.column_config.DatetimeColumn(format="DD.MM HH:mm"),
+            "Первый": st.column_config.DatetimeColumn(format="HH:mm:ss"),
+            "Последний": st.column_config.DatetimeColumn(format="HH:mm:ss"),
+            "Макс. вероятность": st.column_config.ProgressColumn(
+                min_value=0.0, max_value=1.0, format="%.2f"),
+            "Отправлено": st.column_config.CheckboxColumn(),
+        },
+    )
+
+
+def _ago(delta: pd.Timedelta) -> str:
+    minutes = int(delta.total_seconds() // 60)
+    if minutes < 60:
+        return f"{minutes} мин назад"
+    if minutes < 48 * 60:
+        return f"{minutes // 60} ч назад"
+    return f"{minutes // 1440} дн. назад"
+
+
+def _render_file_analysis(assets: Assets, provider, user, role) -> None:
     upload = _handle_upload(user, role)
     if upload is None:
         return

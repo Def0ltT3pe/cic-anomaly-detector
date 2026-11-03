@@ -23,3 +23,5 @@ audit/
 
 # адреса серверов для pull_captures.ps1
 pull_captures.json
+# история monitor.py: адреса атакующих и своих серверов
+monitor/
