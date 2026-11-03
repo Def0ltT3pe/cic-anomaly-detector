@@ -11,5 +11,7 @@ pyarrow>=15,<22
 anthropic>=1.17,<2
 # Ed25519-подпись checksums.json.
 cryptography>=42,<50
+# Первый вход на сервер по паролю во вкладке «Серверы» (дальше — системный ssh по ключу).
+paramiko>=3.4,<6
 
 kagglehub

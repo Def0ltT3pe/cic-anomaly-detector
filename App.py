@@ -30,6 +30,7 @@ from modules.auth import (
     LOGIN_THROTTLE,
     AuthError,
     authenticate,
+    can_manage_servers,
     can_use_llm,
     can_view_audit,
     load_users,
@@ -58,6 +59,7 @@ from modules.charts import daily_chart, deviation_chart, timeline_chart, top_cha
 from modules.explainer import feature_deviations
 from modules.model_catalog import ModelEntry, list_models
 from modules.monitor import RETAIN_DAYS, daily_counts, load_incidents
+from modules import servers as srv
 from modules.overview import (
     ANOMALY,
     ATTACK,
@@ -1092,17 +1094,21 @@ def main() -> None:
         provider = _select_llm_provider(user, role)
 
     _render_header(entry)
+    # Вкладки по возможностям: мониторинг — если monitor.py уже запускался,
+    # серверы — админу и только там, где есть ssh (не в Docker)
+    sections = {":material/upload_file: Анализ файла":
+                lambda: _render_file_analysis(assets, provider, user, role)}
     monitoring = load_incidents()
-    if monitoring is None:  # monitor.py не запускался (например, в Docker)
-        _render_file_analysis(assets, provider, user, role)
+    if monitoring is not None:
+        sections[":material/monitor_heart: Мониторинг серверов"] = lambda: _render_monitoring(*monitoring)
+    if can_manage_servers(role) and shutil.which("ssh"):
+        sections[":material/dns: Серверы"] = lambda: _render_servers(user, role)
+    if len(sections) == 1:
+        next(iter(sections.values()))()
         return
-    file_tab, monitor_tab = st.tabs(
-        [":material/upload_file: Анализ файла", ":material/monitor_heart: Мониторинг серверов"]
-    )
-    with monitor_tab:
-        _render_monitoring(*monitoring)
-    with file_tab:
-        _render_file_analysis(assets, provider, user, role)
+    for tab, render in zip(st.tabs(list(sections)), sections.values()):
+        with tab:
+            render()
 
 
 def _render_monitoring(incidents: pd.DataFrame, updated) -> None:
@@ -1164,6 +1170,188 @@ def _ago(delta: pd.Timedelta) -> str:
     if minutes < 48 * 60:
         return f"{minutes // 60} ч назад"
     return f"{minutes // 1440} дн. назад"
+
+
+def _render_servers(user, role) -> None:
+    """Серверы сбора: список из pull_captures.json и добавление нового по SSH."""
+    try:
+        configured = [srv.entry_from_config(item) for item in srv.load_config()]
+    except (OSError, ValueError) as exc:
+        st.error(f"{srv.config_path()} не прочитан: {exc}")
+        return
+    st.caption(
+        f"Список — {srv.config_path()}. Серверы из него забирает pull_captures.ps1 "
+        "(задача Планировщика) и проверяет monitor.py."
+    )
+    if not configured:
+        st.info("Серверов пока нет — добавьте первый ниже.")
+    for entry in configured:
+        _render_server_card(entry, user, role)
+
+    st.markdown("#### Добавить сервер")
+    pending = st.session_state.get("new_server")
+    if pending is None:
+        _render_server_connect(configured, user, role)
+    else:
+        _render_server_start(pending, user, role)
+
+
+def _server_action(entry, user, role, action: str, run) -> None:
+    """Действие по SSH с журналом и выводом команды под карточкой."""
+    try:
+        with st.spinner(f"{entry.host}: выполняется…"):
+            output = run()
+    except srv.ServerError as exc:
+        log_event(user, role, f"server_{action}", server=entry.name, host=entry.host, ok=False)
+        st.session_state[f"server_out_{entry.name}"] = ("error", str(exc))
+        return
+    log_event(user, role, f"server_{action}", server=entry.name, host=entry.host, ok=True)
+    st.session_state[f"server_out_{entry.name}"] = ("ok", output or "Готово.")
+
+
+def _render_server_card(entry, user, role) -> None:
+    with st.container(border=True):
+        info, status, stop, remove = st.columns([4, 1.3, 1.3, 1.3], vertical_alignment="center")
+        info.markdown(f"**{entry.name}** `{entry.target}`  \n{entry.remote} → {entry.local}")
+        if status.button("Статус", key=f"server_status_{entry.name}", icon=":material/info:",
+                         width="stretch"):
+            _server_action(entry, user, role, "status", lambda: srv.collector(entry, "status"))
+        if stop.button("Остановить", key=f"server_stop_{entry.name}", icon=":material/stop_circle:",
+                       width="stretch"):
+            _server_action(entry, user, role, "stop", lambda: srv.collector(entry, "stop"))
+        with remove.popover("Удалить", icon=":material/delete:", width="stretch"):
+            st.write(f"Убрать **{entry.name}** из списка? Сбор на сервере не останавливается, "
+                     "скачанные файлы остаются.")
+            if st.button("Убрать из списка", key=f"server_remove_{entry.name}", type="primary"):
+                srv.remove_from_config(entry.name)
+                log_event(user, role, "server_remove", server=entry.name, host=entry.host)
+                st.rerun()
+        result = st.session_state.get(f"server_out_{entry.name}")
+        if result is not None:
+            kind, text = result
+            if kind == "error":
+                st.error(text, icon=":material/error:")
+            else:
+                st.code(text, language=None)
+
+
+def _default_local(configured, name: str) -> str:
+    """Папка для захватов: рядом с папками уже добавленных серверов."""
+    parents = [os.path.dirname(entry.local) for entry in configured if entry.local]
+    base = parents[0] if parents else os.path.join(BASE_DIR, "captures")
+    return os.path.join(base, name or "serverX")
+
+
+def _render_server_connect(configured, user, role) -> None:
+    st.caption(
+        "Пароль нужен один раз: приложение входит по нему, записывает ключ этого компьютера "
+        "в authorized_keys сервера и дальше работает только по ключу. Пароль нигде не "
+        "сохраняется. Нужен root или пользователь с sudo без пароля."
+    )
+    with st.form("server_connect", clear_on_submit=True, border=True):
+        left, right = st.columns(2)
+        name = left.text_input("Имя", placeholder="serverC", help="Латиница, цифры, «-» и «_»")
+        host = right.text_input("Адрес сервера", placeholder="203.0.113.10")
+        user_name = left.text_input("Пользователь", value="root")
+        password = right.text_input("Пароль", type="password")
+        remote = left.text_input("Папка сбора на сервере", value=srv.DEFAULT_REMOTE_DIR)
+        local = right.text_input("Папка на этом компьютере", placeholder=_default_local(configured, ""),
+                                 help="Пусто — рядом с папками других серверов")
+        submitted = st.form_submit_button("Подключиться", type="primary", icon=":material/link:")
+    if not submitted:
+        return
+    try:
+        entry = srv.validate(name, user_name, host, remote, local or _default_local(configured, name.strip()))
+        if any(item.name.lower() == entry.name.lower() or item.host == entry.host for item in configured):
+            raise srv.ServerError("Сервер с таким именем или адресом уже в списке.")
+        with st.status(f"Подключение к {entry.target}…", expanded=True) as status:
+            key = srv.public_key(create=True)
+            if password:
+                st.write("Вход по паролю и запись ключа…")
+                fingerprint = srv.install_key_with_password(entry, password, key)
+                st.write(f"Ключ хоста: `{fingerprint}`")
+            else:
+                fingerprint = None
+                st.write("Пароль не указан — пробую войти по уже добавленному ключу.")
+            st.write("Проверка входа по ключу и прав…")
+            privileges = srv.check_key_login(entry)
+            st.write("Копирование collect_capture.sh…")
+            srv.install_collector(entry)
+            dumpcap = srv.has_dumpcap(entry)
+            status.update(label=f"{entry.target}: подключено ({privileges})", state="complete")
+    except srv.ServerError as exc:
+        log_event(user, role, "server_connect", host=host.strip(), ok=False)
+        st.error(str(exc), icon=":material/error:")
+        return
+    log_event(user, role, "server_connect", server=entry.name, host=entry.host, ok=True,
+              by_password=bool(password))
+    st.session_state.new_server = {"entry": entry, "fingerprint": fingerprint, "dumpcap": dumpcap}
+    st.rerun()
+
+
+def _render_server_start(pending: dict, user, role) -> None:
+    entry = pending["entry"]
+    with st.container(border=True):
+        st.markdown(f"**{entry.name}** `{entry.target}` — подключено, ключ записан.")
+        if pending.get("fingerprint"):
+            st.caption(f"Ключ хоста при первом входе: {pending['fingerprint']}")
+        if not pending["dumpcap"]:
+            st.warning("На сервере нет dumpcap (пакет tshark) — без него сбор не запустится.")
+            if st.button("Установить tshark (apt-get)", icon=":material/download:"):
+                try:
+                    with st.spinner("apt-get install tshark… это может занять пару минут"):
+                        srv.install_dumpcap(entry)
+                        pending["dumpcap"] = srv.has_dumpcap(entry)
+                    log_event(user, role, "server_install_tshark", server=entry.name, ok=True)
+                except srv.ServerError as exc:
+                    log_event(user, role, "server_install_tshark", server=entry.name, ok=False)
+                    st.error(str(exc), icon=":material/error:")
+                st.rerun()
+            if st.button("Отмена", key="server_cancel_tshark"):
+                st.session_state.pop("new_server", None)
+                st.rerun()
+            return
+
+        cols = st.columns(3)
+        duration = cols[0].text_input("Сколько писать", value="7d", help="30m, 12h, 7d; 0 — до остановки")
+        reserve = cols[1].number_input("Запас места, ГБ", min_value=0, max_value=1000, value=5,
+                                       help="Сколько оставить свободным всегда; запись остановится раньше")
+        file_mb = cols[2].number_input("Файл кольца, МБ", min_value=10, max_value=2000, value=100,
+                                       help="Меньше файл — чаще забирается и быстрее проверяется")
+        plan, start, cancel = st.columns([1, 1.6, 1])
+        try:
+            options = srv.start_options(duration, reserve, file_mb)
+        except srv.ServerError as exc:
+            st.error(str(exc))
+            return
+        if plan.button("Рассчитать место", icon=":material/calculate:", width="stretch"):
+            try:
+                with st.spinner("plan…"):
+                    st.session_state.new_server_plan = srv.collector(entry, "plan", *options)
+            except srv.ServerError as exc:
+                st.session_state.new_server_plan = f"Ошибка: {exc}"
+        if start.button("Запустить сбор и добавить", type="primary", icon=":material/play_arrow:",
+                        width="stretch"):
+            try:
+                with st.spinner("Запуск сбора…"):
+                    output = srv.collector(entry, "start", *options)
+                srv.add_to_config(entry)
+            except srv.ServerError as exc:
+                log_event(user, role, "server_add", server=entry.name, host=entry.host, ok=False)
+                st.error(str(exc), icon=":material/error:")
+                return
+            log_event(user, role, "server_add", server=entry.name, host=entry.host, ok=True,
+                      duration=duration)
+            st.session_state.pop("new_server", None)
+            st.session_state.pop("new_server_plan", None)
+            st.session_state[f"server_out_{entry.name}"] = ("ok", output)
+            st.rerun()
+        if cancel.button("Отмена", width="stretch"):
+            st.session_state.pop("new_server", None)
+            st.session_state.pop("new_server_plan", None)
+            st.rerun()
+        if st.session_state.get("new_server_plan"):
+            st.code(st.session_state.new_server_plan, language=None)
 
 
 def _render_file_analysis(assets: Assets, provider, user, role) -> None:

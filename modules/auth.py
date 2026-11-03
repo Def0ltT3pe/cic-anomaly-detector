@@ -234,5 +234,10 @@ def can_use_llm(role: str | None) -> bool:
     return role in ("admin", "analyst")
 
 
+def can_manage_servers(role: str | None) -> bool:
+    """Подключение серверов по SSH и запуск на них сбора — только админ."""
+    return role == "admin"
+
+
 def can_view_audit(role: str | None) -> bool:
     return role == "admin"
