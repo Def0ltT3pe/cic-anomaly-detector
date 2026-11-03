@@ -12,8 +12,10 @@ from modules.servers import (
     ServerError,
     add_to_config,
     authorized_keys_command,
+    check_all,
     check_key_login,
     collector,
+    collector_state,
     entry_from_config,
     install_collector,
     install_key_with_password,
@@ -228,6 +230,27 @@ class PasswordBootstrapTests(unittest.TestCase):
             install_key_with_password(self.entry, "bad", "ssh-ed25519 AAAA me@pc")
         self.assertIn("пароль", str(caught.exception))
         self.assertFalse(os.path.exists(os.path.join(self.tmp, "known_hosts")))
+
+
+class StateTests(unittest.TestCase):
+    def test_collector_state(self):
+        self.assertEqual(collector_state("Состояние:        идёт запись (dumpcap PID 42)"), "running")
+        self.assertEqual(collector_state("Состояние:        запись не идёт"), "stopped")
+        self.assertEqual(collector_state("Сессий в /var/lib/cic-capture нет."), "empty")
+
+    def test_check_all_marks_unreachable(self):
+        entries = [ServerEntry("ok", "root", "203.0.113.10"), ServerEntry("down", "root", "203.0.113.11")]
+
+        def runner(args, input=None, capture_output=True, timeout=None):
+            if "root@203.0.113.11" in args:
+                return subprocess.CompletedProcess(args, 255, b"", b"Connection timed out")
+            return subprocess.CompletedProcess(args, 0, "Состояние: идёт запись".encode(), b"")
+
+        with patch.object(servers, "_ssh_binary", return_value="ssh"):
+            states = check_all(entries, runner=runner)
+        self.assertEqual(states["ok"][0], "running")
+        self.assertEqual(states["down"][0], "unreachable")
+        self.assertIn("timed out", states["down"][1])
 
 
 if __name__ == "__main__":

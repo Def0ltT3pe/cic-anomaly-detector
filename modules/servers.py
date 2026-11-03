@@ -302,3 +302,38 @@ def collector(entry: ServerEntry, action: str, *options: str, runner=subprocess.
     if action not in ("plan", "start", "status", "stop"):
         raise ServerError(f"Неизвестное действие: {action}")
     return ssh_run(entry, collector_command(entry, action, *options), runner=runner)
+
+
+# --- состояние сбора для списка серверов -------------------------------------
+
+RUNNING, STOPPED, EMPTY, UNREACHABLE = "running", "stopped", "empty", "unreachable"
+
+
+def collector_state(output: str) -> str:
+    """Вывод `collect_capture.sh status` -> running / stopped / empty."""
+    if "идёт запись" in output:
+        return RUNNING
+    if "Сессий в" in output and "нет" in output:
+        return EMPTY
+    return STOPPED
+
+
+def check_all(entries: list[ServerEntry], runner=subprocess.run, workers: int = 8) -> dict:
+    """Статус сбора на всех серверах сразу: {имя: (состояние, вывод)}.
+
+    Параллельно: недоступный сервер ждёт ConnectTimeout и не задерживает
+    остальные.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    def one(entry):
+        try:
+            output = collector(entry, "status", runner=runner)
+        except ServerError as exc:
+            return entry.name, (UNREACHABLE, str(exc))
+        return entry.name, (collector_state(output), output)
+
+    if not entries:
+        return {}
+    with ThreadPoolExecutor(max_workers=min(workers, len(entries))) as pool:
+        return dict(pool.map(one, entries))

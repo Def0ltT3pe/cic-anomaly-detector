@@ -1179,50 +1179,86 @@ def _render_servers(user, role) -> None:
     except (OSError, ValueError) as exc:
         st.error(f"{srv.config_path()} не прочитан: {exc}")
         return
+    pending = st.session_state.get("new_server")
     st.caption(
-        f"Список — {srv.config_path()}. Серверы из него забирает pull_captures.ps1 "
-        "(задача Планировщика) и проверяет monitor.py."
+        "Серверы из pull_captures.json: их забирает pull_captures.ps1 и проверяет monitor.py.",
+        help=f"Файл: {srv.config_path()}",
     )
+    # Кнопки по ширине текста и с переносом: в колонках они обрезались до «Пров…»
+    toolbar = st.container(horizontal=True, horizontal_alignment="right")
+    if configured and toolbar.button("Проверить все", icon=":material/refresh:"):
+        with st.spinner("Опрос серверов…"):
+            states = srv.check_all(configured)
+        checked = pd.Timestamp.now()
+        for name, (state, output) in states.items():
+            st.session_state[f"server_state_{name}"] = (state, checked)
+            st.session_state[f"server_out_{name}"] = (
+                "error" if state == srv.UNREACHABLE else "ok", output)
+        log_event(user, role, "server_check_all", servers=len(states))
+    add_label = f"Продолжить: {pending['entry'].name}" if pending else "Добавить сервер"
+    if toolbar.button(add_label, type="primary", icon=":material/add:"):
+        _add_server_dialog(configured, user, role)
+
     if not configured:
-        st.info("Серверов пока нет — добавьте первый ниже.")
+        st.info("Серверов пока нет. Нажмите «Добавить сервер»: понадобятся адрес и пароль root.")
     for entry in configured:
         _render_server_card(entry, user, role)
 
-    st.markdown("#### Добавить сервер")
-    pending = st.session_state.get("new_server")
-    if pending is None:
-        _render_server_connect(configured, user, role)
-    else:
-        _render_server_start(pending, user, role)
+
+# Состояние записи: подпись, цвет метки, значок
+SERVER_STATES = {
+    srv.RUNNING: ("идёт запись", "green", ":material/radio_button_checked:"),
+    srv.STOPPED: ("запись не идёт", "orange", ":material/pause_circle:"),
+    srv.EMPTY: ("сбор не запускался", "gray", ":material/radio_button_unchecked:"),
+    srv.UNREACHABLE: ("нет связи", "red", ":material/link_off:"),
+}
 
 
 def _server_action(entry, user, role, action: str, run) -> None:
-    """Действие по SSH с журналом и выводом команды под карточкой."""
+    """Действие по SSH: журнал, вывод под карточкой и состояние записи."""
     try:
         with st.spinner(f"{entry.host}: выполняется…"):
             output = run()
     except srv.ServerError as exc:
         log_event(user, role, f"server_{action}", server=entry.name, host=entry.host, ok=False)
         st.session_state[f"server_out_{entry.name}"] = ("error", str(exc))
+        st.session_state[f"server_state_{entry.name}"] = (srv.UNREACHABLE, pd.Timestamp.now())
         return
     log_event(user, role, f"server_{action}", server=entry.name, host=entry.host, ok=True)
     st.session_state[f"server_out_{entry.name}"] = ("ok", output or "Готово.")
+    st.session_state[f"server_state_{entry.name}"] = (srv.collector_state(output), pd.Timestamp.now())
 
 
 def _render_server_card(entry, user, role) -> None:
     with st.container(border=True):
-        info, status, stop, remove = st.columns([4, 1.3, 1.3, 1.3], vertical_alignment="center")
-        info.markdown(f"**{entry.name}** `{entry.target}`  \n{entry.remote} → {entry.local}")
-        if status.button("Статус", key=f"server_status_{entry.name}", icon=":material/info:",
-                         width="stretch"):
+        info, actions = st.columns([3, 1], vertical_alignment="center")
+        buttons = actions.container(horizontal=True, horizontal_alignment="right")
+        state = st.session_state.get(f"server_state_{entry.name}")
+        with info:
+            st.markdown(f"**{entry.name}** :gray[{entry.target}]")
+            if state is None:
+                st.badge("не проверялся", color="gray", icon=":material/help:",
+                         help="Нажмите «Статус» или «Проверить все»")
+            else:
+                label, color, icon = SERVER_STATES[state[0]]
+                st.badge(f"{label}, {state[1]:%H:%M}", color=color, icon=icon)
+            st.caption(f"{entry.remote} → {entry.local}")
+        if buttons.button("Статус", key=f"server_status_{entry.name}", icon=":material/info:"):
             _server_action(entry, user, role, "status", lambda: srv.collector(entry, "status"))
-        if stop.button("Остановить", key=f"server_stop_{entry.name}", icon=":material/stop_circle:",
-                       width="stretch"):
-            _server_action(entry, user, role, "stop", lambda: srv.collector(entry, "stop"))
-        with remove.popover("Удалить", icon=":material/delete:", width="stretch"):
-            st.write(f"Убрать **{entry.name}** из списка? Сбор на сервере не останавливается, "
-                     "скачанные файлы остаются.")
-            if st.button("Убрать из списка", key=f"server_remove_{entry.name}", type="primary"):
+        with buttons.popover("", icon=":material/more_vert:", help="Остановить или убрать из списка"):
+            st.markdown(f"**Остановить сбор на {entry.name}**")
+            st.caption("dumpcap остановится, последний кусок журнала SSH выгрузится. "
+                       "Запустить снова: уберите сервер из списка и добавьте заново, "
+                       "пароль уже не понадобится.")
+            if st.button("Остановить сбор", key=f"server_stop_{entry.name}", type="primary",
+                         icon=":material/stop_circle:"):
+                _server_action(entry, user, role, "stop", lambda: srv.collector(entry, "stop"))
+                st.rerun()
+            st.divider()
+            st.markdown(f"**Убрать {entry.name} из списка**")
+            st.caption("Сбор на сервере не останавливается, скачанные файлы остаются.")
+            if st.button("Убрать из списка", key=f"server_remove_{entry.name}",
+                         icon=":material/delete:"):
                 srv.remove_from_config(entry.name)
                 log_event(user, role, "server_remove", server=entry.name, host=entry.host)
                 st.rerun()
@@ -1235,6 +1271,16 @@ def _render_server_card(entry, user, role) -> None:
                 st.code(text, language=None)
 
 
+@st.dialog("Добавить сервер", width="large")
+def _add_server_dialog(configured, user, role) -> None:
+    """Мастер в окне: шаг 1 — подключение, шаг 2 — запуск сбора."""
+    pending = st.session_state.get("new_server")
+    if pending is None:
+        _render_server_connect(configured, user, role)
+    else:
+        _render_server_start(pending, user, role)
+
+
 def _default_local(configured, name: str) -> str:
     """Папка для захватов: рядом с папками уже добавленных серверов."""
     parents = [os.path.dirname(entry.local) for entry in configured if entry.local]
@@ -1243,12 +1289,13 @@ def _default_local(configured, name: str) -> str:
 
 
 def _render_server_connect(configured, user, role) -> None:
+    st.caption("Шаг 1 из 2: подключение")
     st.caption(
         "Пароль нужен один раз: приложение входит по нему, записывает ключ этого компьютера "
         "в authorized_keys сервера и дальше работает только по ключу. Пароль нигде не "
         "сохраняется. Нужен root или пользователь с sudo без пароля."
     )
-    with st.form("server_connect", clear_on_submit=True, border=True):
+    with st.form("server_connect", clear_on_submit=True, border=False):
         left, right = st.columns(2)
         name = left.text_input("Имя", placeholder="serverC", help="Латиница, цифры, «-» и «_»")
         host = right.text_input("Адрес сервера", placeholder="203.0.113.10")
@@ -1286,13 +1333,15 @@ def _render_server_connect(configured, user, role) -> None:
     log_event(user, role, "server_connect", server=entry.name, host=entry.host, ok=True,
               by_password=bool(password))
     st.session_state.new_server = {"entry": entry, "fingerprint": fingerprint, "dumpcap": dumpcap}
-    st.rerun()
+    st.rerun(scope="fragment")  # окно остаётся открытым: шаг 2
 
 
 def _render_server_start(pending: dict, user, role) -> None:
     entry = pending["entry"]
-    with st.container(border=True):
-        st.markdown(f"**{entry.name}** `{entry.target}` — подключено, ключ записан.")
+    st.caption("Шаг 2 из 2: запуск сбора")
+    with st.container():
+        st.success(f"{entry.name} ({entry.target}): подключено, ключ записан.",
+                   icon=":material/check_circle:")
         if pending.get("fingerprint"):
             st.caption(f"Ключ хоста при первом входе: {pending['fingerprint']}")
         if not pending["dumpcap"]:
@@ -1306,7 +1355,8 @@ def _render_server_start(pending: dict, user, role) -> None:
                 except srv.ServerError as exc:
                     log_event(user, role, "server_install_tshark", server=entry.name, ok=False)
                     st.error(str(exc), icon=":material/error:")
-                st.rerun()
+                    return
+                st.rerun(scope="fragment")
             if st.button("Отмена", key="server_cancel_tshark"):
                 st.session_state.pop("new_server", None)
                 st.rerun()
