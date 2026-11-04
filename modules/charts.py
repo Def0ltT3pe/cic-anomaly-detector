@@ -117,3 +117,23 @@ def daily_chart(data: pd.DataFrame, theme: str | None = None):
         text="Инцидентов:Q"
     ).transform_filter("datum['Инцидентов'] > 0")
     return (bars + labels).properties(height=220)
+
+
+def hourly_chart(data: pd.DataFrame, value: str, series: str = "blue", theme: str | None = None):
+    """Одна величина по часам («Потоков» или «Тревог»): линия с подсказкой.
+
+    Потоки и тревоги рисуются разными графиками, а не на двух осях одного:
+    тысячи потоков и единицы тревог на общей оси не читаются.
+    """
+    colors = _colors(theme)
+    hover = alt.selection_point(nearest=True, on="pointerover", fields=["Час"], empty=False)
+    base = alt.Chart(data).encode(
+        x=alt.X("Час:T", title=None, axis=alt.Axis(grid=False, format="%d.%m %H:%M", labelAngle=0)),
+        y=alt.Y(f"{value}:Q", title=value, axis=alt.Axis(tickMinStep=1)),
+    )
+    line = base.mark_line(color=colors[series], strokeWidth=2, interpolate="monotone")
+    points = base.mark_point(color=colors[series], size=60, filled=True).encode(
+        opacity=alt.condition(hover, alt.value(1), alt.value(0)),
+        tooltip=[alt.Tooltip("Час:T", format="%d.%m %H:%M"), alt.Tooltip(f"{value}:Q")],
+    ).add_params(hover)
+    return (line + points).properties(height=200)

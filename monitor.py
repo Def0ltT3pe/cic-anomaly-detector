@@ -28,7 +28,7 @@ from modules.alerts import META_COLUMNS, detect_local_ip, has_meta  # noqa: E402
 from modules.bruteforce import load_bruteforce  # noqa: E402
 from modules.calibration import load_calibration  # noqa: E402
 from modules.model_loader import load_model_objects, load_normal_stats, resolve_model_dir  # noqa: E402
-from modules.monitor import FLAGGED_COLUMNS, load_servers, run, state_dir  # noqa: E402
+from modules.monitor import FLAGGED_COLUMNS, hourly_counts, load_servers, run, state_dir  # noqa: E402
 from modules.notify import NotifyError, send_telegram, telegram_settings  # noqa: E402
 from modules.pipeline import detect_anomalies  # noqa: E402
 from pcap_to_flows import ConversionError, convert_pcap, find_tshark  # noqa: E402
@@ -78,13 +78,13 @@ class Analyzer:
         )
         flows, _ = convert_pcap(path, self.tshark)
         if flows.empty or not has_meta(flows):
-            return flows.reindex(columns=FLAGGED_COLUMNS).iloc[:0], None
+            return flows.reindex(columns=FLAGGED_COLUMNS).iloc[:0], None, None
         result = detect_anomalies(flows, model, scaler, selector, feature_cols,
                                   fill_values=means, calibration=calibration)
         proba = brute.predict_proba(result.X)
         flagged = result.df.loc[proba >= brute.threshold, list(META_COLUMNS)].copy()
         flagged["proba"] = proba[proba >= brute.threshold].astype(np.float64)
-        return flagged.reset_index(drop=True), detect_local_ip(flows)
+        return flagged.reset_index(drop=True), detect_local_ip(flows), hourly_counts(flows)
 
 
 def build_parser() -> argparse.ArgumentParser:

@@ -55,9 +55,10 @@ from modules.llm_explain import (
     providers,
     stream_chat,
 )
-from modules.charts import daily_chart, deviation_chart, timeline_chart, top_chart
+from modules.charts import daily_chart, deviation_chart, hourly_chart, timeline_chart, top_chart
 from modules.explainer import feature_deviations
 from modules.model_catalog import ModelEntry, list_models
+from modules import monitor as mon
 from modules.monitor import RETAIN_DAYS, daily_counts, load_incidents
 from modules import servers as srv
 from modules.overview import (
@@ -1100,7 +1101,7 @@ def main() -> None:
                 lambda: _render_file_analysis(assets, provider, user, role)}
     monitoring = load_incidents()
     if monitoring is not None:
-        sections[":material/monitor_heart: Мониторинг серверов"] = lambda: _render_monitoring(*monitoring)
+        sections[":material/monitor_heart: Мониторинг серверов"] = lambda: _render_monitoring(*monitoring, user, role)
     if can_manage_servers(role) and shutil.which("ssh"):
         sections[":material/dns: Серверы"] = lambda: _render_servers(user, role)
     if len(sections) == 1:
@@ -1111,7 +1112,7 @@ def main() -> None:
             render()
 
 
-def _render_monitoring(incidents: pd.DataFrame, updated) -> None:
+def _render_monitoring(incidents: pd.DataFrame, updated, user=None, role=None) -> None:
     """Инциденты, которые monitor.py нашёл в захватах с серверов."""
     age = pd.Timestamp.now(tz="UTC") - pd.Timestamp(updated)
     st.caption(
@@ -1119,14 +1120,22 @@ def _render_monitoring(incidents: pd.DataFrame, updated) -> None:
         f"({_ago(age)}). Проверку запускает pull_captures.ps1 после скачивания; "
         f"вручную — python monitor.py. Время инцидентов — UTC."
     )
-    servers = sorted(incidents["server"].unique()) if len(incidents) else []
-    if len(servers) > 1:
+    # Серверы — и из списка pull_captures.json (у них может не быть инцидентов)
+    try:
+        configured = {e.name: e for e in map(srv.entry_from_config, srv.load_config())}
+    except (OSError, ValueError):
+        configured = {}
+    names = sorted(set(configured) | (set(incidents["server"]) if len(incidents) else set()))
+    server = "Все"
+    if len(names) > 1:
         server = st.segmented_control(
-            "Сервер", ["Все", *servers], default="Все", required=True,
+            "Сервер", ["Все", *names], default="Все", required=True,
             key="monitor_server", label_visibility="collapsed",
         )
-        if server != "Все":
-            incidents = incidents[incidents["server"] == server]
+    elif names:
+        server = names[0]
+    if server != "Все":
+        incidents = incidents[incidents["server"] == server]
 
     stamps = pd.to_datetime(incidents["window_start"])
     day_ago = pd.Timestamp.now(tz="UTC").tz_convert(None) - pd.Timedelta(days=1)
@@ -1139,6 +1148,11 @@ def _render_monitoring(incidents: pd.DataFrame, updated) -> None:
     cols[3].metric("Не отправлено", f"{pending:,}", border=True,
                    help="Инциденты, о которых ещё не ушло сообщение в Telegram: "
                         "не настроен бот или не было сети. Уйдут при следующей проверке.")
+    if server == "Все":
+        _render_servers_comparison(names, configured, incidents)
+    else:
+        _render_server_stats(server, configured.get(server), incidents, user, role)
+
     if not len(incidents):
         st.success(f"За {RETAIN_DAYS} дней инцидентов нет.")
         return
@@ -1161,6 +1175,136 @@ def _render_monitoring(incidents: pd.DataFrame, updated) -> None:
             "Отправлено": st.column_config.CheckboxColumn(),
         },
     )
+
+
+def _day_ago() -> pd.Timestamp:
+    return pd.Timestamp.now(tz="UTC").tz_convert(None) - pd.Timedelta(days=1)
+
+
+def _share(value) -> str:
+    return "—" if value is None else f"{value:.2%}"
+
+
+def _render_servers_comparison(names, configured, incidents) -> None:
+    """«Все»: серверы рядом — трафик, доля тревог и инциденты за сутки."""
+    directory = mon.state_dir()
+    rows = []
+    for name in names:
+        day = mon.traffic_summary(mon.server_traffic(directory, name), _day_ago())
+        own = incidents[incidents["server"] == name]
+        entry = configured.get(name)
+        downloaded = mon.last_download(entry.local) if entry and entry.local else None
+        rows.append({
+            "Сервер": name,
+            "Потоков за сутки": day["flows"],
+            "Доля тревог": day["share"],
+            "Инцидентов за сутки": int((pd.to_datetime(own["window_start"]) >= _day_ago()).sum()),
+            f"За {RETAIN_DAYS} дней": len(own),
+            "Скачано": pd.Timestamp(downloaded).tz_convert(None) if downloaded else None,
+        })
+    if not rows:
+        return
+    st.markdown("##### Серверы за сутки")
+    st.dataframe(
+        pd.DataFrame(rows), hide_index=True,
+        column_config={
+            "Доля тревог": st.column_config.NumberColumn(
+                format="percent", help="Тревожных потоков от всех за сутки"),
+            "Скачано": st.column_config.DatetimeColumn(
+                "Последнее скачивание", format="DD.MM HH:mm", help="UTC"),
+        },
+    )
+
+
+def _render_server_stats(name, entry, incidents, user, role) -> None:
+    """Один сервер: трафик и тревоги по часам, атакующие, порты, состояние сбора."""
+    directory = mon.state_dir()
+    traffic = mon.server_traffic(directory, name)
+    day = mon.traffic_summary(traffic, _day_ago())
+    downloaded = mon.last_download(entry.local) if entry and entry.local else None
+
+    st.markdown(f"##### {name}: трафик за сутки")
+    cols = st.columns(3, gap="small")
+    cols[0].metric("Потоков", f"{day['flows']:,}", border=True)
+    cols[1].metric("Тревожных", f"{day['alerts']:,}", border=True,
+                   help=f"Доля от всех потоков: {_share(day['share'])}")
+    cols[2].metric("Скачано", _ago(pd.Timestamp.now(tz="UTC") - pd.Timestamp(downloaded))
+                   if downloaded else "—", border=True,
+                   help="Когда pull_captures.ps1 последний раз скачал файл захвата")
+    if len(traffic):
+        left, right = st.columns(2)
+        left.altair_chart(hourly_chart(traffic, "Потоков", "blue", _theme()), width="stretch")
+        right.altair_chart(hourly_chart(traffic, "Тревог", "orange", _theme()), width="stretch")
+        if not traffic["Потоков"].any():
+            st.caption("Все потоки по часам monitor.py считает с этой версии: "
+                       "график заполнится после следующей проверки.")
+    else:
+        st.caption("monitor.py ещё не проверял захваты этого сервера.")
+
+    attackers = mon.top_attackers(incidents)
+    ports = mon.attacked_ports(directory, name, mon.load_state(directory)["local_ip"].get(name))
+    left, right = st.columns([3, 2])
+    with left:
+        st.markdown("##### Атакующие адреса")
+        if len(attackers):
+            st.dataframe(attackers, hide_index=True, column_config={
+                "Последний раз": st.column_config.DatetimeColumn(format="DD.MM HH:mm")})
+        else:
+            st.caption("Инцидентов нет.")
+    with right:
+        st.markdown("##### Порты под ударом")
+        if len(ports):
+            st.altair_chart(top_chart(ports, "Порт", _theme()), width="stretch")
+        else:
+            st.caption("Тревог нет.")
+
+    if entry is not None and can_manage_servers(role) and shutil.which("ssh"):
+        _render_collection_stats(entry, user, role)
+
+
+def _render_collection_stats(entry, user, role) -> None:
+    """Состояние сбора с самого сервера по SSH — по кнопке: опрос занимает секунды."""
+    head, button = st.columns([3, 1], vertical_alignment="center")
+    head.markdown("##### Сбор на сервере")
+    if button.button("Обновить", key=f"collection_{entry.name}", icon=":material/refresh:"):
+        try:
+            with st.spinner(f"{entry.host}: опрос…"):
+                stats = srv.collection_stats(entry)
+            st.session_state[f"collection_{entry.name}_stats"] = (stats, pd.Timestamp.now())
+            log_event(user, role, "server_collection_stats", server=entry.name, ok=True)
+        except srv.ServerError as exc:
+            log_event(user, role, "server_collection_stats", server=entry.name, ok=False)
+            _show_server_error(str(exc))
+            return
+    cached = st.session_state.get(f"collection_{entry.name}_stats")
+    if cached is None:
+        st.caption("Свободное место, объём записи и сколько живёт файл в кольце — "
+                   "нажмите «Обновить», чтобы спросить сервер.")
+        return
+    stats, checked = cached
+    label, color, icon = SERVER_STATES[stats["state"]]
+    st.badge(f"{label}, проверено {checked:%H:%M}", color=color, icon=icon)
+    gb = lambda mb: "—" if mb is None else f"{mb / 1024:.1f} ГБ"  # noqa: E731
+    cols = st.columns(4, gap="small")
+    cols[0].metric("Свободно на диске", gb(stats["free_mb"]), border=True)
+    cols[1].metric("Записано", gb(stats["used_mb"]), border=True,
+                   help=f"Кольцо: {gb(stats['ring_mb'])}, файлов {stats['files'] or 0}")
+    cols[2].metric("Темп записи", "—" if stats["rate_mb_h"] is None else f"{stats['rate_mb_h']:.0f} МБ/ч",
+                   border=True)
+    cols[3].metric("Файл живёт", "—" if stats["ring_hours"] is None else f"{stats['ring_hours']:.1f} ч",
+                   border=True, help="Через сколько часов кольцо перезапишет файл")
+    if stats["started"] is not None:
+        st.caption(f"Запись идёт с {stats['started']:%d.%m.%Y %H:%M} UTC.")
+    if stats["ring_hours"] is not None and stats["ring_hours"] < RING_WARN_HOURS:
+        st.warning(
+            f"Файл перезаписывается через {stats['ring_hours']:.1f} ч, а pull_captures.ps1 "
+            "по умолчанию забирает раз в 2 ч: часть захвата может пропасть. Запускайте "
+            "скачивание чаще (-EveryHours 1) или перезапустите сбор с большим кольцом.",
+            icon=":material/warning:",
+        )
+
+
+RING_WARN_HOURS = 4  # вдвое больше интервала скачивания по умолчанию
 
 
 def _ago(delta: pd.Timedelta) -> str:
