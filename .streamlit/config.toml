@@ -1,5 +1,8 @@
 [server]
 headless = true
+# Только этот компьютер: без пароля приложение пускает всех как admin, а вкладка
+# «Серверы» управляет серверами по SSH. Docker задаёт 0.0.0.0 в команде запуска.
+address = "localhost"
 maxUploadSize = 500
 
 [browser]
@@ -31,6 +34,8 @@ textColor = "#17212C"
 borderColor = "#D0D8E0"
 linkColor = "#2F4A66"
 codeBackgroundColor = "#E8ECF0"
+# Код — цветом текста: зелёный по умолчанию читался как статус «всё в порядке»
+codeTextColor = "#2F4A66"
 
 [theme.light.sidebar]
 backgroundColor = "#EAEEF2"
@@ -45,6 +50,7 @@ textColor = "#DCE3EA"
 borderColor = "#2E3A47"
 linkColor = "#9DB7D3"
 codeBackgroundColor = "#1D2631"
+codeTextColor = "#C3D2E1"
 
 [theme.dark.sidebar]
 backgroundColor = "#18202A"

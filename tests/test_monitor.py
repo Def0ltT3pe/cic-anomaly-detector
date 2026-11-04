@@ -166,6 +166,15 @@ class MonitorTests(unittest.TestCase):
         server = load_servers(path, trusted_env="203.0.113.5")[0]
         self.assertEqual((server.name, server.model_dir, len(server.trusted)), ("serverA", "models", 2))
 
+    def test_load_servers_rejects_path_in_name(self):
+        path = os.path.join(self.tmp, "pull_captures.json")
+        for name in (r"..\..\x", "../x", "a/b"):
+            with self.subTest(name=name):
+                with open(path, "w", encoding="utf-8") as handle:
+                    json.dump([{"name": name, "local": self.local}], handle)
+                with self.assertRaises(ValueError):
+                    load_servers(path)
+
 
 class FakeResponse(io.BytesIO):
     def __enter__(self):
