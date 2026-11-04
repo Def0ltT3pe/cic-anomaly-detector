@@ -99,3 +99,21 @@ def deviation_chart(deviations: pd.DataFrame, theme: str | None = None):
     below = base.mark_text(align="right", dx=-6, **text).encode(text="Подпись:N").transform_filter("datum.z < 0")
     zero = alt.Chart(pd.DataFrame({"z": [0]})).mark_rule(color=colors["rule"]).encode(x="z:Q")
     return (bars + above + below + zero).properties(height=max(140, 30 * len(data)))
+
+
+def daily_chart(data: pd.DataFrame, theme: str | None = None):
+    """Инцидентов по дням: столбцы с подписью числа над ненулевыми."""
+    colors = _colors(theme)
+    # Ось по дням как категории: у временной оси Vega ставит деления каждые
+    # 12 часов, и подпись каждого дня повторялась дважды
+    data = data.assign(Дата=data["День"].dt.strftime("%d.%m"))
+    base = alt.Chart(data).encode(
+        x=alt.X("Дата:O", sort=None, title=None, axis=alt.Axis(labelAngle=0)),
+        y=alt.Y("Инцидентов:Q", title="Инцидентов", axis=alt.Axis(tickMinStep=1)),
+        tooltip=[alt.Tooltip("Дата:O", title="День"), alt.Tooltip("Инцидентов:Q")],
+    )
+    bars = base.mark_bar(color=colors["blue"], cornerRadiusEnd=3, width={"band": 0.7})
+    labels = base.mark_text(dy=-6, color=colors["ink"]).encode(
+        text="Инцидентов:Q"
+    ).transform_filter("datum['Инцидентов'] > 0")
+    return (bars + labels).properties(height=220)

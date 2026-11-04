@@ -8,6 +8,8 @@
       2. пропускает файл захвата, который ещё пишется (самый новый в сессии,
          изменён меньше 3 минут назад);
       3. скачивает новые и недокачанные файлы через .part с проверкой размера.
+    Затем запускает monitor.py: инциденты в новых захватах и уведомления в
+    Telegram (нужен .venv проекта; -NoMonitor — только скачать).
     Кольцо на сервере перезаписывает старые файлы, поэтому запускать нужно
     чаще, чем оно заполняется (см. README); -Install ставит задачу в
     Планировщик Windows.
@@ -16,7 +18,8 @@
 
 .EXAMPLE
     .\pull_captures.ps1 -DryRun          # что будет скачано, без скачивания
-    .\pull_captures.ps1                  # скачать
+    .\pull_captures.ps1                  # скачать и проверить
+    .\pull_captures.ps1 -NoMonitor       # только скачать
     .\pull_captures.ps1 -Install -EveryHours 2
     .\pull_captures.ps1 -Uninstall
 #>
@@ -24,6 +27,7 @@
 param(
     [string]$Config = (Join-Path $PSScriptRoot 'pull_captures.json'),
     [switch]$DryRun,
+    [switch]$NoMonitor,
     [switch]$Install,
     [switch]$Uninstall,
     [ValidateRange(1, 24)][int]$EveryHours = 2
@@ -222,8 +226,29 @@ function Main {
             Write-Log "  ОШИБКА $($server.name): $($_.Exception.Message)"
         }
     }
+    if (-not $DryRun -and -not $NoMonitor) {
+        if (-not (Invoke-Monitor)) { $failed++ }
+    }
     if ($failed) { Write-Log "Готово с ошибками: $failed"; exit 1 }
     Write-Log 'Готово'
+}
+
+function Invoke-Monitor {
+    <# Проверка скачанного: monitor.py ищет инциденты в новых захватах и
+       шлёт уведомления. Свой журнал он дописывает в pull.log сам (UTF-8). #>
+    $python = Join-Path $PSScriptRoot '.venv\Scripts\python.exe'
+    $monitorScript = Join-Path $PSScriptRoot 'monitor.py'
+    if (-not (Test-Path -LiteralPath $python) -or -not (Test-Path -LiteralPath $monitorScript)) {
+        Write-Log "Проверка инцидентов пропущена: нет $python или monitor.py"
+        return $true
+    }
+    Write-Log '== проверка новых захватов (monitor.py)'
+    $result = Invoke-Native { & $python $monitorScript --config $Config --log-file $script:LogPath }
+    if ($result.ExitCode -ne 0) {
+        Write-Log "  monitor.py завершился с кодом $($result.ExitCode)"
+        return $false
+    }
+    return $true
 }
 
 # При dot-source (тесты) — только функции, без запуска
