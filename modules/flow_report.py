@@ -18,7 +18,7 @@ import re
 import numpy as np
 import pandas as pd
 
-from modules.alerts import detect_local_ip, has_meta
+from modules.alerts import detect_local_ip, has_meta, parse_timestamps
 from modules.explainer import explain_anomaly
 
 TOP_FEATURES = 10
@@ -109,7 +109,7 @@ def safe_label(label) -> str:
 
 
 def _timestamp(value) -> str:
-    stamp = pd.to_datetime(value, errors="coerce")
+    stamp = parse_timestamps([value]).iloc[0]
     return "н/д" if pd.isna(stamp) else stamp.isoformat(sep=" ", timespec="seconds")
 
 

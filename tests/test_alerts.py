@@ -6,6 +6,7 @@ import pandas as pd
 from modules.alerts import (
     aggregate_alerts,
     detect_local_ip,
+    parse_timestamps,
     parse_trusted,
     summarize,
     trusted_mask,
@@ -98,6 +99,34 @@ class AggregateAlertsTests(unittest.TestCase):
         text = summarize(incidents, self.flagged)
         self.assertIn("подозрительных потоков 6 -> инцидентов 3", text)
         self.assertIn("нет адресов", summarize(None, self.flagged))
+
+
+class ParseTimestampsTests(unittest.TestCase):
+    def test_cic_dates_are_day_first(self):
+        # CIC-IDS2017: «03/07/2017» — 3 июля (среда), а не 7 марта
+        stamps = parse_timestamps(["03/07/2017 08:55:58", "7/7/2017 3:30"])
+        self.assertEqual(list(stamps), [pd.Timestamp("2017-07-03 08:55:58"), pd.Timestamp("2017-07-07 03:30")])
+
+    def test_iso_and_datetime_values_are_not_swapped(self):
+        stamps = parse_timestamps(pd.Series(
+            ["2026-01-11 10:05:00", "2026-11-01T10:05:00Z", pd.Timestamp("2026-01-02 03:04")], dtype=object))
+        self.assertEqual(list(stamps), [pd.Timestamp("2026-01-11 10:05"), pd.Timestamp("2026-11-01 10:05"),
+                                        pd.Timestamp("2026-01-02 03:04")])
+        datetimes = pd.Series(pd.to_datetime(["2026-01-11"]))
+        self.assertEqual(parse_timestamps(datetimes).iloc[0], pd.Timestamp("2026-01-11"))
+
+    def test_garbage_becomes_nat(self):
+        self.assertTrue(parse_timestamps(["not a date", None, "![x](https://example.com/t.png)"]).isna().all())
+
+    def test_incidents_from_cic_csv_dates(self):
+        frame = pd.DataFrame({
+            "Src IP": ["203.0.113.5"] * 3, "Src Port": [40001, 40002, 40003],
+            "Dst IP": [SERVER] * 3, "Dst Port": [443] * 3,
+            "Timestamp": ["03/07/2017 08:05:00", "03/07/2017 08:25:00", "03/07/2017 08:45:00"],
+        })
+        incidents = aggregate_alerts(frame, np.ones(3, dtype=bool), local_ip=SERVER)
+        self.assertEqual(len(incidents), 1)
+        self.assertEqual(incidents.iloc[0]["window_start"], pd.Timestamp("2017-07-03 08:00"))
 
 
 if __name__ == "__main__":
