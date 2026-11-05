@@ -10,7 +10,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from modules.alerts import detect_local_ip, has_meta
+from modules.alerts import detect_local_ip, has_meta, parse_timestamps
 
 PROTOCOLS = {6: "TCP", 17: "UDP", 1: "ICMP"}
 # Шаг графика по длительности захвата: не больше ~60–120 точек на линию
@@ -44,7 +44,7 @@ def alert_timeline(df: pd.DataFrame, masks: dict[str, np.ndarray]) -> pd.DataFra
     """
     if "Timestamp" not in df.columns:
         return None
-    stamps = pd.to_datetime(df["Timestamp"], errors="coerce")
+    stamps = parse_timestamps(df["Timestamp"])
     valid = stamps.notna().to_numpy()
     if not valid.any():
         return None
@@ -92,7 +92,7 @@ def flow_table(
     df = result.df.iloc[rows]
     table = pd.DataFrame({"#": np.asarray(rows, dtype=int)})
     if has_meta(result.df):
-        stamps = pd.to_datetime(df["Timestamp"], errors="coerce")
+        stamps = parse_timestamps(df["Timestamp"])
         table["Время"] = stamps.dt.strftime("%d.%m %H:%M:%S").fillna("—").to_numpy()
         table["Источник"] = (df["Src IP"].astype(str) + ":" + df["Src Port"].astype(str)).to_numpy()
         table["Назначение"] = (df["Dst IP"].astype(str) + ":" + df["Dst Port"].astype(str)).to_numpy()

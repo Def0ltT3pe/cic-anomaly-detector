@@ -22,6 +22,8 @@ pcap_to_flows.py (без --no-meta); в датасетах CIC их нет.
 from __future__ import annotations
 
 import ipaddress
+import re
+from datetime import datetime
 
 import numpy as np
 import pandas as pd
@@ -30,10 +32,39 @@ META_COLUMNS = ("Src IP", "Dst IP", "Src Port", "Dst Port", "Timestamp")
 DEFAULT_WINDOW = "1h"
 DEFAULT_MIN_FLOWS = 3
 DEFAULT_IMMEDIATE_PORTS = (22,)
+ISO_START = re.compile(r"^\s*\d{4}-")
 
 
 def has_meta(df: pd.DataFrame) -> bool:
     return all(column in df.columns for column in META_COLUMNS)
+
+
+def parse_timestamps(values) -> pd.Series:
+    """Время потоков -> datetime без часового пояса (непонятное — NaT).
+
+    В CSV CIC-IDS время записано как «03/07/2017 08:55:58» — это день/месяц,
+    а pandas по умолчанию читает месяц/день. dayfirst для всей колонки
+    нельзя: он переставляет и ISO-даты («2026-01-11» становится 1 ноября),
+    а их пишет pcap_to_flows. Поэтому даты-объекты и ISO разбираются как
+    есть, а остальное — с днём впереди.
+    """
+    series = pd.Series(values)
+    if pd.api.types.is_datetime64_any_dtype(series):
+        return series.dt.tz_localize(None) if series.dt.tz is not None else series
+    result = pd.Series(pd.NaT, index=series.index, dtype="datetime64[ns]")
+    is_stamp = series.map(lambda value: isinstance(value, (datetime, np.datetime64)))
+    if is_stamp.any():
+        result[is_stamp] = pd.to_datetime(series[is_stamp], utc=True).dt.tz_localize(None)
+    text = series[~is_stamp].astype(str)
+    iso = text.str.match(ISO_START)
+    if iso.any():
+        result[iso[iso].index] = pd.to_datetime(
+            text[iso], errors="coerce", format="ISO8601", utc=True
+        ).dt.tz_localize(None)
+    other = text[~iso]
+    if len(other):
+        result[other.index] = pd.to_datetime(other, errors="coerce", format="mixed", dayfirst=True)
+    return result
 
 
 def detect_local_ip(df: pd.DataFrame) -> str:
@@ -111,7 +142,7 @@ def aggregate_alerts(
             return pd.DataFrame(columns=columns)
     # Порт сервиса на стороне сервера: для входящих — Dst Port, для исходящих — Src Port
     local_port = np.where(outbound, df["Src Port"], df["Dst Port"]).astype(int)
-    stamps = pd.to_datetime(df["Timestamp"])
+    stamps = parse_timestamps(df["Timestamp"])
     if proba is None:
         proba = np.ones(len(df), dtype=float)
 

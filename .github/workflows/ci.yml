@@ -36,7 +36,7 @@ jobs:
             App.py detector.py calibrate_model.py manage_users.py \
             make_checksums.py train_bruteforce.py train_model_v2.py \
             adapt_model.py evaluate.py pcap_to_flows.py label_from_authlog.py build_flagship.py \
-            modules tests
+            monitor.py modules tests
 
       - name: Shell syntax check
         run: bash -n collect_capture.sh
@@ -45,3 +45,39 @@ jobs:
         env:
           AUDIT_ENABLED: "0"
         run: python -m unittest discover -s tests -v
+
+  docker:
+    name: Docker image
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build
+        run: docker build -t cic-anomaly-detector:ci .
+
+      # Процесс приложения не должен менять свой код и модели (подменённый .pkl
+      # исполнил бы код), а писать может только в audit/
+      - name: File permissions
+        run: |
+          docker run --rm --entrypoint sh cic-anomaly-detector:ci -c '
+            set -e
+            test "$(id -u)" = 1000
+            for path in /app/App.py /app/models/isolation_forest.pkl /app/modules/x; do
+              if touch "$path" 2>/dev/null; then echo "writable: $path"; exit 1; fi
+            done
+            touch /app/audit/ci-check
+            command -v tshark >/dev/null
+            echo ok'
+
+      - name: Start and health check
+        run: |
+          docker run -d --name app -e APP_PASSWORD=ci-check-password \
+            -p 127.0.0.1:8501:8501 cic-anomaly-detector:ci
+          for attempt in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8501/_stcore/health; then exit 0; fi
+            sleep 2
+          done
+          docker logs app
+          exit 1
