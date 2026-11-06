@@ -820,12 +820,29 @@ Fable 5.1 / Sonnet 5.5). Таймаут ожидания — 120 с на каж�
 python -m unittest discover -s tests -v
 ```
 
-29 тестов: валидация признаков, explainer, калибровка, пароли/роли,
-Ed25519-подпись (включая подмену файла, хэша и подписи), версия.
-Тесты не требуют parquet, API-ключей и Docker.
+Около 250 тестов: признаки и детекция, калибровка, подпись моделей
+(подмена файла, хэша, подписи, чужой ключ), пароли, роли и блокировка входа,
+инциденты, мониторинг и Telegram, SSH-серверы, интерфейс через
+`streamlit.testing` (вход, загрузка, вкладки). Тесты не требуют parquet,
+API-ключей, сети и Docker.
 
-CI: `.github/workflows/ci.yml` — Python 3.12, установка зависимостей,
-`compileall` и `unittest` на каждый push/PR.
+CI: `.github/workflows/ci.yml` — Python 3.12, `compileall` и `unittest`, плюс
+сборка Docker-образа с проверкой прав на файлы и `/_stcore/health`.
+
+Мутационное тестирование (вручную, не в CI): `cosmic-ray` вносит в модуль
+мелкие ошибки и проверяет, что тесты их замечают. На `alerts`, `integrity`,
+`auth`, `notify`, `monitor` и `servers` (969 мутантов) тесты ловят 83%;
+выжившие — в основном равносильные замены (таймауты, `is` вместо `==` для
+строк, отступы JSON). Пример для одного модуля:
+```bash
+pip install cosmic-ray==8.7.0
+cosmic-ray init cr.toml cr.sqlite      # module-path, test-command — в cr.toml
+cr-filter-operators cr.sqlite cr.toml  # убрать замены на <<, ^, ** и т.п.
+cosmic-ray exec cr.toml cr.sqlite
+cr-report cr.sqlite --surviving-only --show-diff
+```
+Модули из одного прогона нельзя мутировать параллельно в одной папке:
+тесты мониторинга импортируют `alerts` и `servers`.
 
 ## Документы
 

@@ -50,7 +50,8 @@ def parse_timestamps(values) -> pd.Series:
     """
     series = pd.Series(values)
     if pd.api.types.is_datetime64_any_dtype(series):
-        return series.dt.tz_localize(None) if series.dt.tz is not None else series
+        # Время с поясом — в UTC, как у pcap_to_flows, а не просто без пояса
+        return series.dt.tz_convert("UTC").dt.tz_localize(None) if series.dt.tz is not None else series
     result = pd.Series(pd.NaT, index=series.index, dtype="datetime64[ns]")
     is_stamp = series.map(lambda value: isinstance(value, (datetime, np.datetime64)))
     if is_stamp.any():

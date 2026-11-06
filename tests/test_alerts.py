@@ -101,7 +101,61 @@ class AggregateAlertsTests(unittest.TestCase):
         self.assertIn("нет адресов", summarize(None, self.flagged))
 
 
+class AlertEdgeCaseTests(unittest.TestCase):
+    """Ветки, которые нашли выжившие мутанты (cosmic-ray)."""
+
+    def test_inbound_from_address_sorting_before_server(self):
+        # «1.2.3.4» по строке меньше «10.0.0.1»: направление — по точному совпадению
+        df = flows([("1.2.3.4", 40000, SERVER, 22, "2026-10-29 10:05"),
+                    (SERVER, 51000, "198.51.100.1", 443, "2026-10-29 10:00")])
+        incidents = aggregate_alerts(df, np.array([True, False]), local_ip=SERVER)
+        self.assertEqual(list(incidents["peer"]), ["1.2.3.4"])
+        self.assertEqual(incidents.iloc[0]["services"], "22")
+
+    def test_many_ports_are_truncated(self):
+        ports = [21, 22, 23, 25, 80, 443]
+        df = flows([("192.0.2.9", 40000 + n, SERVER, port, "2026-10-29 10:05") for n, port in enumerate(ports)])
+        incidents = aggregate_alerts(df, np.ones(len(ports), dtype=bool), local_ip=SERVER)
+        self.assertEqual(incidents.iloc[0]["services"], "21, 22, 23, 25, 80 …")
+        five = aggregate_alerts(df.iloc[:5], np.ones(5, dtype=bool), local_ip=SERVER)
+        self.assertEqual(five.iloc[0]["services"], "21, 22, 23, 25, 80")
+
+    def test_order_and_columns(self):
+        df = flows([
+            ("192.0.2.1", 1, SERVER, 22, "2026-10-29 11:05"),
+            ("192.0.2.2", 2, SERVER, 443, "2026-10-29 10:05"),
+            ("192.0.2.2", 3, SERVER, 443, "2026-10-29 10:06"),
+            ("192.0.2.2", 4, SERVER, 443, "2026-10-29 10:07"),
+            ("192.0.2.3", 5, SERVER, 22, "2026-10-29 10:30"),
+        ])
+        incidents = aggregate_alerts(df, np.ones(5, dtype=bool), local_ip=SERVER)
+        # Сначала ранние окна, внутри окна — больше потоков
+        self.assertEqual(list(incidents["peer"]), ["192.0.2.2", "192.0.2.3", "192.0.2.1"])
+        self.assertEqual(list(incidents.index), [0, 1, 2])
+        self.assertEqual(list(incidents.columns), ["peer", "window_start", "flows", "services", "max_proba",
+                                                   "first_seen", "last_seen", "reason", "rows"])
+
+    def test_trusted_networks_with_host_bits(self):
+        # Так пишут подсети на практике: «192.168.1.5/24», а не «192.168.1.0/24»
+        networks = parse_trusted("198.51.100.7/24, 2001:db8::1/64")
+        self.assertEqual(str(networks[0]), "198.51.100.0/24")
+        mask = trusted_mask(["198.51.100.200", "203.0.113.1", "2001:db8::5"], ["198.51.100.7/24", "2001:db8::1/64"])
+        self.assertEqual(list(mask), [True, False, True])
+
+    def test_summarize_empty(self):
+        empty = aggregate_alerts(flows([("192.0.2.30", 1, SERVER, 443, "2026-10-29 10:15")]),
+                                 np.array([True]), local_ip=SERVER)
+        self.assertEqual(summarize(empty, np.array([True])),
+                         "подозрительных потоков 1 -> инцидентов 0 (в них 0 потоков, от 0 адресов)")
+
+
 class ParseTimestampsTests(unittest.TestCase):
+    def test_timezone_aware_values(self):
+        aware = pd.Series(pd.to_datetime(["2026-11-01 10:00+03:00"]))
+        self.assertEqual(parse_timestamps(aware).iloc[0], pd.Timestamp("2026-11-01 07:00"))
+        objects = pd.Series([pd.Timestamp("2026-11-01 10:00", tz="Europe/Moscow")], dtype=object)
+        self.assertEqual(parse_timestamps(objects).iloc[0], pd.Timestamp("2026-11-01 07:00"))
+
     def test_cic_dates_are_day_first(self):
         # CIC-IDS2017: «03/07/2017» — 3 июля (среда), а не 7 марта
         stamps = parse_timestamps(["03/07/2017 08:55:58", "7/7/2017 3:30"])

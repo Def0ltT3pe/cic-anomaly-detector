@@ -1,3 +1,4 @@
+import json
 import os
 import unittest
 from unittest.mock import patch
@@ -13,7 +14,9 @@ from modules.integrity import (
 from tests.helpers import make_temp_dir, remove_temp_dir
 
 
-class IntegrityTests(unittest.TestCase):
+class IntegrityCase(unittest.TestCase):
+    """Временная папка, пара ключей и один файл модели."""
+
     def setUp(self):
         self.dir = make_temp_dir()
         self.private = os.path.join(self.dir, "private.pem")
@@ -30,6 +33,8 @@ class IntegrityTests(unittest.TestCase):
     def tearDown(self):
         remove_temp_dir(self.dir)
 
+
+class IntegrityTests(IntegrityCase):
     def test_signed_checksums_verify(self):
         with patch.dict(os.environ, self.env, clear=False):
             write_checksums(self.dir, ["dummy.pkl"], key_path=self.private)
@@ -124,6 +129,143 @@ class IntegrityTests(unittest.TestCase):
             write_checksums(self.dir, ["dummy.pkl"], sign=False)
             payload = verify_checksums(self.dir, ["dummy.pkl"])
         self.assertNotIn("signature", payload)
+
+
+class IntegrityEdgeCaseTests(IntegrityCase):
+    """Ветки, которые нашли выжившие мутанты (cosmic-ray)."""
+
+    def signed(self):
+        with patch.dict(os.environ, self.env, clear=False):
+            write_checksums(self.dir, ["dummy.pkl"], key_path=self.private)
+        return os.path.join(self.dir, "checksums.json")
+
+    def rewrite(self, path, change):
+        with open(path, encoding="utf-8") as handle:
+            payload = json.load(handle)
+        change(payload)
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle)
+
+    def test_any_hash_mismatch_is_detected(self):
+        # Несовпадение — в любую сторону, а не только когда хэш «больше» ожидаемого
+        for fake in ("0" * 64, "f" * 64):
+            with self.subTest(fake=fake):
+                with patch.dict(os.environ, {**self.env, "MODEL_PUBLIC_KEY": os.path.join(self.dir, "absent.pem")}):
+                    write_checksums(self.dir, ["dummy.pkl"], sign=False)
+                    self.rewrite(os.path.join(self.dir, "checksums.json"),
+                                 lambda p: p["files"].update({"dummy.pkl": fake}))
+                    with self.assertRaises(IntegrityError):
+                        verify_checksums(self.dir, ["dummy.pkl"])
+
+    def test_every_problem_is_reported(self):
+        with open(os.path.join(self.dir, "second.pkl"), "wb") as handle:
+            handle.write(b"x")
+        self.signed()
+        with patch.dict(os.environ, self.env, clear=False), self.assertRaises(IntegrityError) as caught:
+            verify_checksums(self.dir, ["absent.pkl", "second.pkl", "dummy.pkl"])
+        message = str(caught.exception)
+        self.assertIn("absent.pkl: файл отсутствует", message)
+        self.assertIn("second.pkl: нет записи", message)
+
+    def test_key_order_in_file_does_not_break_signature(self):
+        path = self.signed()
+        # Тот же JSON с ключами в обратном порядке — подпись по каноническому виду
+        self.rewrite(path, lambda p: p.update(dict(reversed(list(p.items())))))
+        with patch.dict(os.environ, self.env, clear=False):
+            self.assertIn("signature", verify_checksums(self.dir, ["dummy.pkl"]))
+
+    def test_signature_from_other_key_is_rejected(self):
+        path = self.signed()
+        other_private = os.path.join(self.dir, "other.pem")
+        other_public = os.path.join(self.dir, "other.pub.pem")
+        generate_keypair(other_private, other_public, force=True)
+        with patch.dict(os.environ, {**self.env, "MODEL_PUBLIC_KEY": other_public}):
+            with self.assertRaises(IntegrityError) as caught:
+                verify_checksums(self.dir, ["dummy.pkl"])
+        self.assertIn("Отпечаток", str(caught.exception))
+        # Без отпечатка в файле подпись всё равно не сходится с чужим ключом
+        self.rewrite(path, lambda p: p["signature"].pop("fingerprint"))
+        with patch.dict(os.environ, {**self.env, "MODEL_PUBLIC_KEY": other_public}):
+            with self.assertRaises(IntegrityError):
+                verify_checksums(self.dir, ["dummy.pkl"])
+
+    def test_malformed_signature_and_checksums(self):
+        broken = [
+            lambda p: p["signature"].update({"value": "не base64!"}),
+            lambda p: p["signature"].pop("value"),
+            lambda p: p.pop("files"),
+        ]
+        for change in broken:
+            with self.subTest(change=change):
+                path = self.signed()
+                self.rewrite(path, change)
+                with patch.dict(os.environ, self.env, clear=False), self.assertRaises(IntegrityError):
+                    verify_checksums(self.dir, ["dummy.pkl"])
+        with open(os.path.join(self.dir, "checksums.json"), "w", encoding="utf-8") as handle:
+            handle.write("{not json")
+        with patch.dict(os.environ, self.env, clear=False), self.assertRaises(IntegrityError):
+            verify_checksums(self.dir, ["dummy.pkl"])
+
+    def test_only_exact_flag_values(self):
+        with patch.dict(os.environ, self.env, clear=False):
+            write_checksums(self.dir, ["dummy.pkl"], sign=False)
+        for value in ("2", "true", "yes", " 0 "):
+            with self.subTest(allow=value), patch.dict(os.environ, {**self.env, "ALLOW_UNSIGNED_MODELS": value}):
+                with self.assertRaises(IntegrityError):
+                    verify_checksums(self.dir, ["dummy.pkl"])
+        with patch.dict(os.environ, {**self.env, "ALLOW_UNSIGNED_MODELS": " 1 "}):
+            self.assertIsNotNone(verify_checksums(self.dir, ["dummy.pkl"]))
+        for value, disabled in (("0", True), (" 0 ", True), ("1", False), ("", False), ("-1", False)):
+            with self.subTest(verify=value), patch.dict(os.environ, {**self.env, "VERIFY_MODEL_CHECKSUMS": value}):
+                if disabled:
+                    self.assertIsNone(verify_checksums(self.dir, ["dummy.pkl"]))
+                else:
+                    with self.assertRaises(IntegrityError):
+                        verify_checksums(self.dir, ["dummy.pkl"])
+
+    def test_explicit_key_path_signs_without_default_key(self):
+        env = {**self.env, "MODEL_PRIVATE_KEY": os.path.join(self.dir, "absent", "key.pem")}
+        with patch.dict(os.environ, env):
+            self.assertIn("signature", write_checksums(self.dir, ["dummy.pkl"], key_path=self.private))
+            self.assertNotIn("signature", write_checksums(self.dir, ["dummy.pkl"]))
+            with self.assertRaises(IntegrityError):
+                write_checksums(self.dir, ["dummy.pkl"], sign=True)  # ключа нет — понятная ошибка
+
+    def test_generate_keypair_refuses_to_overwrite(self):
+        with self.assertRaises(IntegrityError):
+            generate_keypair(self.private, self.public)
+        with self.assertRaises(IntegrityError):
+            generate_keypair(self.private, os.path.join(self.dir, "new.pub"))
+        nested = os.path.join(self.dir, "nested", "deeper")
+        generate_keypair(os.path.join(nested, "k.pem"), os.path.join(nested, "k.pub"))
+        self.assertTrue(os.path.isfile(os.path.join(nested, "k.pem")))
+        if os.name != "nt":  # права файлов Windows не хранит
+            self.assertEqual(os.stat(os.path.join(nested, "k.pem")).st_mode & 0o777, 0o600)
+            self.assertEqual(os.stat(os.path.join(nested, "k.pub")).st_mode & 0o777, 0o644)
+
+    def test_file_order_in_checksums_does_not_break_signature(self):
+        with open(os.path.join(self.dir, "second.pkl"), "wb") as handle:
+            handle.write(b"x")
+        with patch.dict(os.environ, self.env, clear=False):
+            write_checksums(self.dir, ["dummy.pkl", "second.pkl"], key_path=self.private)
+        # Другой инструмент мог переписать список файлов в ином порядке
+        self.rewrite(os.path.join(self.dir, "checksums.json"),
+                     lambda p: p.update(files=dict(reversed(list(p["files"].items())))))
+        with patch.dict(os.environ, self.env, clear=False):
+            self.assertIn("signature", verify_checksums(self.dir, ["dummy.pkl", "second.pkl"]))
+
+    def test_relative_key_paths_resolve_from_project(self):
+        from modules import integrity
+
+        # Из другого рабочего каталога: путь считается от проекта, а не от cwd
+        previous = os.getcwd()
+        os.chdir(self.dir)
+        self.addCleanup(os.chdir, previous)
+        with patch.dict(os.environ, {"MODEL_PUBLIC_KEY": "trust/x.pem", "MODEL_PRIVATE_KEY": "keys/y.pem"}):
+            self.assertEqual(integrity.public_key_path(), os.path.join(integrity.BASE_DIR, "trust", "x.pem"))
+            self.assertEqual(integrity.private_key_path(), os.path.join(integrity.BASE_DIR, "keys", "y.pem"))
+        with patch.dict(os.environ, {"MODEL_PUBLIC_KEY": self.public}):
+            self.assertEqual(integrity.public_key_path(), os.path.abspath(self.public))
 
 
 if __name__ == "__main__":
