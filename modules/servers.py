@@ -25,6 +25,8 @@ import subprocess
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
+from modules.fsutil import replace_file
+
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEFAULT_CONFIG = os.path.join(BASE_DIR, "pull_captures.json")
 COLLECTOR_SCRIPT = os.path.join(BASE_DIR, "collect_capture.sh")
@@ -97,7 +99,7 @@ def save_config(entries: list[dict], path: str | None = None) -> None:
     with open(temporary, "w", encoding="utf-8", newline="\n") as handle:
         json.dump(entries, handle, ensure_ascii=False, indent=2)
         handle.write("\n")
-    os.replace(temporary, path)
+    replace_file(temporary, path)
 
 
 def add_to_config(entry: ServerEntry, path: str | None = None) -> None:

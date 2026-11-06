@@ -19,6 +19,8 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
+from modules.fsutil import replace_file
+
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 ROLES = ("admin", "analyst", "viewer")
@@ -120,7 +122,7 @@ def save_users(users: dict[str, dict], path: str | None = None) -> str:
     with open(temporary, "w", encoding="utf-8", newline="\n") as handle:
         json.dump(payload, handle, ensure_ascii=False, indent=2)
     os.chmod(temporary, 0o600)
-    os.replace(temporary, path)
+    replace_file(temporary, path)
     return path
 
 

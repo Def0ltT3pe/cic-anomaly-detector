@@ -29,6 +29,7 @@ from datetime import datetime, timedelta, timezone
 import pandas as pd
 
 from modules.alerts import META_COLUMNS, aggregate_alerts, parse_trusted
+from modules.fsutil import replace_file
 from modules.servers import NAME_RE
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -106,7 +107,7 @@ def save_state(directory: str, state: dict) -> None:
     temporary = path + ".tmp"
     with open(temporary, "w", encoding="utf-8", newline="\n") as handle:
         json.dump(state, handle, ensure_ascii=False, indent=2)
-    os.replace(temporary, path)
+    replace_file(temporary, path)
 
 
 def _capture_key(server: Server, path: str) -> str:
