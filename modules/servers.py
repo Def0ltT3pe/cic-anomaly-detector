@@ -22,6 +22,7 @@ import re
 import shlex
 import shutil
 import subprocess
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
@@ -33,6 +34,18 @@ COLLECTOR_SCRIPT = os.path.join(BASE_DIR, "collect_capture.sh")
 REMOTE_SCRIPT = "/usr/local/sbin/collect_capture.sh"
 DEFAULT_REMOTE_DIR = "/var/lib/cic-capture"
 SSH_TIMEOUT = 15
+# Сервер под перебором паролей: sshd (MaxStartups) случайно сбрасывает часть
+# новых соединений ещё до приветствия SSH. Такой сброс повторяем — команда на
+# сервере в этот момент ещё не выполнялась.
+CONNECT_ATTEMPTS = 3
+RETRY_DELAY = 2.0
+HANDSHAKE_RESET_MARKERS = (
+    "Error reading SSH protocol banner",   # paramiko
+    "kex_exchange_identification",         # OpenSSH: сброс до обмена ключами
+    "10054",                               # Windows: «удалённый хост разорвал подключение»
+    "Connection reset by peer",
+)
+_sleep = time.sleep
 COMMAND_TIMEOUT = 120
 INSTALL_TIMEOUT = 600
 
@@ -182,38 +195,55 @@ def install_key_with_password(entry: ServerEntry, password: str, key: str) -> st
         raise ServerError("Нет пакета paramiko: pip install -r requirements.txt") from exc
 
     known_hosts = os.path.join(ssh_dir(), "known_hosts")
-    client = paramiko.SSHClient()
-    if os.path.isfile(known_hosts):
-        client.load_host_keys(known_hosts)
-    new_keys = []
+    for attempt in range(1, CONNECT_ATTEMPTS + 1):
+        client = paramiko.SSHClient()
+        if os.path.isfile(known_hosts):
+            client.load_host_keys(known_hosts)
+        new_keys = []
 
-    class AcceptNew(paramiko.MissingHostKeyPolicy):
-        def missing_host_key(self, client_, hostname, key_):
-            new_keys.append(key_)
+        class AcceptNew(paramiko.MissingHostKeyPolicy):
+            def missing_host_key(self, client_, hostname, key_):
+                new_keys.append(key_)
 
-    client.set_missing_host_key_policy(AcceptNew())
-    try:
-        client.connect(entry.host, username=entry.user, password=password, timeout=SSH_TIMEOUT,
-                       allow_agent=False, look_for_keys=False)
-        _, stdout, stderr = client.exec_command(authorized_keys_command(key), timeout=SSH_TIMEOUT)
-        status = stdout.channel.recv_exit_status()
-        if status != 0:
-            raise ServerError(f"Ключ не записан: {stderr.read().decode('utf-8', 'replace')[:300]}")
-        host_key = client.get_transport().get_remote_server_key()
-    except paramiko.AuthenticationException:
-        raise ServerError("Неверный пользователь или пароль (или вход по паролю на сервере выключен).") from None
-    except paramiko.BadHostKeyException:
-        raise ServerError(
-            f"Ключ хоста {entry.host} не совпадает с known_hosts — возможна подмена сервера. "
-            "Если сервер переустановлен, удалите его строку: ssh-keygen -R " + entry.host
-        ) from None
-    except (paramiko.SSHException, OSError) as exc:
-        raise ServerError(f"Не удалось подключиться к {entry.host}: {exc}") from None
-    finally:
-        client.close()
+        client.set_missing_host_key_policy(AcceptNew())
+        try:
+            client.connect(entry.host, username=entry.user, password=password, timeout=SSH_TIMEOUT,
+                           allow_agent=False, look_for_keys=False)
+            _, stdout, stderr = client.exec_command(authorized_keys_command(key), timeout=SSH_TIMEOUT)
+            status = stdout.channel.recv_exit_status()
+            if status != 0:
+                raise ServerError(f"Ключ не записан: {stderr.read().decode('utf-8', 'replace')[:300]}")
+            host_key = client.get_transport().get_remote_server_key()
+            break
+        except paramiko.AuthenticationException:
+            raise ServerError("Неверный пользователь или пароль (или вход по паролю на сервере выключен).") from None
+        except paramiko.BadHostKeyException:
+            raise ServerError(
+                f"Ключ хоста {entry.host} не совпадает с known_hosts — возможна подмена сервера. "
+                "Если сервер переустановлен, удалите его строку: ssh-keygen -R " + entry.host
+            ) from None
+        except (paramiko.SSHException, OSError) as exc:
+            if attempt < CONNECT_ATTEMPTS and _is_handshake_reset(exc):
+                _sleep(RETRY_DELAY)
+                continue
+            raise ServerError(f"Не удалось подключиться к {entry.host}: {exc}{_reset_hint(exc)}") from None
+        finally:
+            client.close()
     if new_keys:
         _remember_host_key(entry.host, host_key)
     return host_key.get_name() + " " + fingerprint(host_key.asbytes())
+
+
+def _is_handshake_reset(error) -> bool:
+    text = str(error)
+    return isinstance(error, ConnectionResetError) or any(m in text for m in HANDSHAKE_RESET_MARKERS)
+
+
+def _reset_hint(error) -> str:
+    if not _is_handshake_reset(error):
+        return ""
+    return (". Сервер сбрасывает новые соединения до приветствия SSH — обычно это sshd "
+            "(MaxStartups) под перебором паролей или fail2ban; попробуйте ещё раз через минуту")
 
 
 def fingerprint(blob: bytes) -> str:
@@ -237,14 +267,21 @@ def ssh_run(entry: ServerEntry, command: str, stdin: bytes | None = None,
     """Команда на сервере по ключу; вывод (stdout+stderr) или ServerError."""
     args = [_ssh_binary(), "-o", "BatchMode=yes", "-o", f"ConnectTimeout={SSH_TIMEOUT}",
             "-o", "StrictHostKeyChecking=accept-new", "--", entry.target, command]
-    try:
-        result = runner(args, input=stdin, capture_output=True, timeout=timeout)
-    except subprocess.TimeoutExpired:
-        raise ServerError(f"{entry.host}: команда не уложилась в {timeout} с.") from None
-    output = (result.stdout or b"").decode("utf-8", "replace") + (result.stderr or b"").decode("utf-8", "replace")
+    for attempt in range(1, CONNECT_ATTEMPTS + 1):
+        try:
+            result = runner(args, input=stdin, capture_output=True, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            raise ServerError(f"{entry.host}: команда не уложилась в {timeout} с.") from None
+        output = (result.stdout or b"").decode("utf-8", "replace") + (result.stderr or b"").decode("utf-8", "replace")
+        # Повтор только при сбросе до обмена ключами: команда ещё не запускалась
+        if result.returncode == 255 and "kex_exchange_identification" in output and attempt < CONNECT_ATTEMPTS:
+            _sleep(RETRY_DELAY)
+            continue
+        break
     if result.returncode != 0:
         if result.returncode == 255:  # ошибка самого ssh: сеть, ключ хоста, вход по ключу
-            raise ServerError(f"Не удалось войти на {entry.target} по SSH: {output.strip()[:300]}")
+            raise ServerError(f"Не удалось войти на {entry.target} по SSH: {output.strip()[:300]}"
+                              f"{_reset_hint(output) if 'kex_exchange_identification' in output else ''}")
         raise ServerError(output.strip()[:2000] or f"код {result.returncode}")
     return output
 
