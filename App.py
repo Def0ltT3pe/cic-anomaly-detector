@@ -1423,12 +1423,24 @@ def _show_server_error(text: str) -> None:
     st.code(text, language=None, wrap_lines=True)
 
 
-@st.dialog("Добавить сервер", width="large")
+def _forget_finished_server() -> None:
+    """Окно закрыли крестиком на последнем шаге — мастер начнётся заново."""
+    pending = st.session_state.get("new_server")
+    if pending is not None and pending.get("done") is not None:
+        st.session_state.pop("new_server", None)
+        st.session_state.pop("new_server_plan", None)
+
+
+@st.dialog("Добавить сервер", width="large", on_dismiss=_forget_finished_server)
 def _add_server_dialog(configured, user, role) -> None:
-    """Мастер в окне: шаг 1 — подключение, шаг 2 — запуск сбора."""
+    """Мастер в окне: подключение, tshark (если его нет), запуск сбора, итог."""
     pending = st.session_state.get("new_server")
     if pending is None:
         _render_server_connect(configured, user, role)
+    elif pending.get("done") is not None:
+        _render_server_done(pending)
+    elif not pending["dumpcap"]:
+        _render_tshark_install(pending, user, role)
     else:
         _render_server_start(pending, user, role)
 
@@ -1447,7 +1459,9 @@ def _render_server_connect(configured, user, role) -> None:
         "в authorized_keys сервера и дальше работает только по ключу. Пароль нигде не "
         "сохраняется. Нужен root или пользователь с sudo без пароля."
     )
-    with st.form("server_connect", clear_on_submit=True, border=False):
+    # Поля не очищаются: при ошибке (неверный пароль, нет связи) всё введённое
+    # остаётся — достаточно исправить одно поле и подключиться снова
+    with st.form("server_connect", border=False):
         left, right = st.columns(2)
         name = left.text_input("Имя", placeholder="serverC", help="Латиница, цифры, «-» и «_»")
         host = right.text_input("Адрес сервера", placeholder="203.0.113.10")
@@ -1500,24 +1514,6 @@ def _render_server_start(pending: dict, user, role) -> None:
                    icon=":material/check_circle:")
         if pending.get("fingerprint"):
             st.caption(f"Ключ хоста при первом входе: {pending['fingerprint']}")
-        if not pending["dumpcap"]:
-            st.warning("На сервере нет dumpcap (пакет tshark) — без него сбор не запустится.")
-            if st.button("Установить tshark (apt-get)", icon=":material/download:"):
-                try:
-                    with st.spinner("apt-get install tshark… это может занять пару минут"):
-                        srv.install_dumpcap(entry)
-                        pending["dumpcap"] = srv.has_dumpcap(entry)
-                    log_event(user, role, "server_install_tshark", server=entry.name, ok=True)
-                except srv.ServerError as exc:
-                    log_event(user, role, "server_install_tshark", server=entry.name, ok=False)
-                    _show_server_error(str(exc))
-                    return
-                st.rerun(scope="fragment")
-            if st.button("Отмена", key="server_cancel_tshark"):
-                st.session_state.pop("new_server", None)
-                st.rerun()
-            return
-
         cols = st.columns(3)
         duration = cols[0].text_input("Сколько писать", value="7d", help="30m, 12h, 7d; 0 — до остановки")
         reserve = cols[1].number_input("Запас места, ГБ", min_value=0, max_value=1000, value=5,
@@ -1548,16 +1544,130 @@ def _render_server_start(pending: dict, user, role) -> None:
                 return
             log_event(user, role, "server_add", server=entry.name, host=entry.host, ok=True,
                       duration=duration)
-            st.session_state.pop("new_server", None)
             st.session_state.pop("new_server_plan", None)
             st.session_state[f"server_out_{entry.name}"] = ("ok", output)
-            st.rerun()
+            pending["done"] = {"duration": duration, "reserve": reserve, "file_mb": file_mb}
+            st.rerun(scope="fragment")  # окно остаётся: что будет дальше
         if cancel.button("Отмена", width="stretch"):
             st.session_state.pop("new_server", None)
             st.session_state.pop("new_server_plan", None)
             st.rerun()
         if st.session_state.get("new_server_plan"):
             st.code(st.session_state.new_server_plan, language=None)
+        with st.expander("Как это будет работать", icon=":material/help:"):
+            st.markdown(_how_it_works(entry, duration, reserve, file_mb))
+
+
+# Ручная установка dumpcap: пакет tshark (wireshark-cli) под разные системы
+TSHARK_MANUAL = """\
+# Debian / Ubuntu
+sudo apt-get update && sudo apt-get install -y tshark
+
+# RHEL / CentOS / Rocky / Alma / Fedora
+sudo dnf install -y wireshark-cli
+
+# openSUSE
+sudo zypper install -y wireshark
+
+# Arch
+sudo pacman -S --noconfirm wireshark-cli
+
+# Alpine
+apk add tshark
+
+# Проверка: должен вывести путь и версию
+command -v dumpcap && dumpcap --version | head -n 1"""
+
+
+def _render_tshark_install(pending: dict, user, role) -> None:
+    """Шаг tshark: поставить отсюда по SSH или самому — и проверить установку."""
+    entry = pending["entry"]
+    st.caption("Шаг 2 из 2: установка tshark")
+    st.success(f"{entry.name} ({entry.target}): подключено, ключ записан.",
+               icon=":material/check_circle:")
+    st.warning("На сервере нет dumpcap (пакет tshark) — без него запись трафика не запустится.",
+               icon=":material/warning:")
+    auto, manual = st.tabs([":material/download: Установить отсюда",
+                            ":material/terminal: Установлю сам"])
+    with auto:
+        st.caption("Приложение выполнит на сервере `apt-get install tshark` (Debian и Ubuntu). "
+                   "На других системах — вкладка «Установлю сам».")
+        if st.button("Установить tshark (apt-get)", icon=":material/download:", type="primary"):
+            try:
+                with st.spinner("apt-get install tshark… это может занять пару минут"):
+                    srv.install_dumpcap(entry)
+                    pending["dumpcap"] = srv.has_dumpcap(entry)
+                log_event(user, role, "server_install_tshark", server=entry.name, ok=True)
+            except srv.ServerError as exc:
+                log_event(user, role, "server_install_tshark", server=entry.name, ok=False)
+                _show_server_error(str(exc))
+                st.caption("Не получилось — поставьте вручную: вкладка «Установлю сам».")
+            else:
+                st.rerun(scope="fragment")
+    with manual:
+        st.markdown("1. Войдите на сервер:")
+        st.code(f"ssh {entry.target}", language="bash")
+        st.markdown("2. Выполните команду для своей системы (от root — без `sudo`):")
+        st.code(TSHARK_MANUAL, language="bash")
+        st.caption("Если установщик спросит, разрешать ли захват обычным пользователям, "
+                   "ответ не важен: сбор запускается от root или через sudo.")
+        st.markdown("3. Вернитесь сюда и проверьте:")
+        if st.button("Проверить установку", icon=":material/fact_check:", type="primary"):
+            try:
+                with st.spinner("Ищу dumpcap на сервере…"):
+                    found = srv.has_dumpcap(entry)
+            except srv.ServerError as exc:
+                _show_server_error(str(exc))
+            else:
+                log_event(user, role, "server_check_tshark", server=entry.name, found=found)
+                if found:
+                    pending["dumpcap"] = True
+                    st.rerun(scope="fragment")  # дальше — настройка записи
+                st.warning("dumpcap пока не найден. Проверьте вывод последней команды "
+                           "из списка выше и нажмите «Проверить установку» ещё раз.",
+                           icon=":material/search_off:")
+    if st.button("Отмена", key="server_cancel_tshark"):
+        st.session_state.pop("new_server", None)
+        st.rerun()
+
+
+def _how_it_works(entry, duration: str, reserve, file_mb) -> str:
+    """Что происходит после запуска сбора: сервер -> этот компьютер -> мониторинг."""
+    span = "до остановки" if duration == "0" else f"{duration}, затем запись остановится сама"
+    return f"""\
+**На сервере {entry.name}**
+- `dumpcap` пишет заголовки пакетов (без содержимого) кольцом файлов по {file_mb} МБ
+  в `{entry.remote}`. Когда кольцо заполнено, самый старый файл перезаписывается;
+  {reserve} ГБ свободного места не трогаются никогда — при нехватке запись остановится.
+- Сколько писать: {span}. Сбор идёт в фоне и не зависит от этого приложения и SSH.
+- Раз в час рядом сохраняется журнал SSH (`ssh_*.log`) — по нему размечается брутфорс.
+
+**На этом компьютере**
+- `pull_captures.ps1` по ключу (без пароля) скачивает новые файлы в
+  `{entry.local}`. Файл, который ещё пишется, пропускается и скачается в следующий раз.
+- Сразу после скачивания `monitor.py` проверяет новые захваты моделью. Новые
+  инциденты появляются во вкладке «Мониторинг серверов» и уходят в Telegram,
+  если бот настроен в `.env`.
+
+**Что нужно сделать**
+- Запускать скачивание: вручную — `.\\pull_captures.ps1` в папке проекта, или по
+  расписанию — `.\\pull_captures.ps1 -Install -EveryHours 2` (задача в Планировщике Windows).
+- Запускать чаще, чем заполняется кольцо, иначе старые файлы перезапишутся до
+  скачивания. На сколько хватит кольца, показывает кнопка «Рассчитать место».
+- Состояние записи — кнопка «Статус» на карточке сервера; остановить — меню ⋮ →
+  «Остановить сбор»."""
+
+
+def _render_server_done(pending: dict) -> None:
+    """Итог: сервер добавлен, сбор идёт — и как всё будет работать дальше."""
+    entry, done = pending["entry"], pending["done"]
+    st.caption("Готово")
+    st.success(f"{entry.name}: сбор запущен, сервер добавлен в список.",
+               icon=":material/check_circle:")
+    st.markdown(_how_it_works(entry, done["duration"], done["reserve"], done["file_mb"]))
+    if st.button("Готово", type="primary", icon=":material/done:"):
+        st.session_state.pop("new_server", None)
+        st.rerun()
 
 
 def _render_file_analysis(assets: Assets, provider, user, role) -> None:
