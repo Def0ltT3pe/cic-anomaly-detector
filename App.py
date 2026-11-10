@@ -1445,6 +1445,25 @@ def _add_server_dialog(configured, user, role) -> None:
         _render_server_start(pending, user, role)
 
 
+WIZARD_STEPS = ("Подключение", "Установка tshark", "Настройка записи", "Готово")
+
+
+def _render_wizard_steps(current: int) -> None:
+    """Шаги мастера в одну строку: пройденные — с галочкой, текущий выделен.
+    Если tshark на сервере уже есть, его шаг просто отмечается пройденным."""
+    parts = []
+    for number, title in enumerate(WIZARD_STEPS):
+        label = f"{number + 1}. {title}"
+        if number < current:
+            parts.append(f":green[:material/check_circle: {label}]")
+        elif number == current:
+            parts.append(f"**:blue[:material/radio_button_checked: {label}]**")
+        else:
+            parts.append(f":gray[:material/radio_button_unchecked: {label}]")
+    st.markdown(" &nbsp;→&nbsp; ".join(parts))
+    st.progress((current + 1) / len(WIZARD_STEPS))
+
+
 def _default_local(configured, name: str) -> str:
     """Папка для захватов: рядом с папками уже добавленных серверов."""
     parents = [os.path.dirname(entry.local) for entry in configured if entry.local]
@@ -1453,7 +1472,7 @@ def _default_local(configured, name: str) -> str:
 
 
 def _render_server_connect(configured, user, role) -> None:
-    st.caption("Шаг 1 из 2: подключение")
+    _render_wizard_steps(0)
     st.caption(
         "Пароль нужен один раз: приложение входит по нему, записывает ключ этого компьютера "
         "в authorized_keys сервера и дальше работает только по ключу. Пароль нигде не "
@@ -1508,7 +1527,7 @@ def _render_server_connect(configured, user, role) -> None:
 
 def _render_server_start(pending: dict, user, role) -> None:
     entry = pending["entry"]
-    st.caption("Шаг 2 из 2: запуск сбора")
+    _render_wizard_steps(2)
     with st.container():
         st.success(f"{entry.name} ({entry.target}): подключено, ключ записан.",
                    icon=":material/check_circle:")
@@ -1583,7 +1602,7 @@ command -v dumpcap && dumpcap --version | head -n 1"""
 def _render_tshark_install(pending: dict, user, role) -> None:
     """Шаг tshark: поставить отсюда по SSH или самому — и проверить установку."""
     entry = pending["entry"]
-    st.caption("Шаг 2 из 2: установка tshark")
+    _render_wizard_steps(1)
     st.success(f"{entry.name} ({entry.target}): подключено, ключ записан.",
                icon=":material/check_circle:")
     st.warning("На сервере нет dumpcap (пакет tshark) — без него запись трафика не запустится.",
@@ -1720,7 +1739,7 @@ def _render_pull_help(entry) -> None:
 def _render_server_done(pending: dict) -> None:
     """Итог: сервер добавлен, сбор идёт — и как всё будет работать дальше."""
     entry, done = pending["entry"], pending["done"]
-    st.caption("Готово")
+    _render_wizard_steps(3)
     st.success(f"{entry.name}: сбор запущен, сервер добавлен в список.",
                icon=":material/check_circle:")
     st.markdown(_how_it_works(entry, done["duration"], done["reserve"], done["file_mb"]))
