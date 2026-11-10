@@ -12,6 +12,7 @@ from unittest.mock import patch
 
 import numpy as np
 import pandas as pd
+import streamlit
 from streamlit.testing.v1 import AppTest
 
 from modules import auth
@@ -154,6 +155,83 @@ class AppSmokeTests(unittest.TestCase):
         self.assertEqual(app.segmented_control(key="view").value, "Разбор потока")
         self.assertEqual(app.session_state["review_flow"], 7)
 
+
+def _server_dialog_script():
+    """Окно «Добавить сервер» открыто на каждом прогоне: AppTest не держит
+    диалог-фрагмент открытым между перезапусками, как браузер."""
+    import App  # noqa: PLC0415
+    App._add_server_dialog([], None, "admin")
+
+
+class AddServerDialogTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = make_temp_dir()
+        self.addCleanup(remove_temp_dir, self.tmp)
+        self.env = patch.dict(os.environ, {"AUDIT_ENABLED": "0",
+                                           "PULL_CONFIG": os.path.join(self.tmp, "pull.json")})
+        self.env.start()
+        self.addCleanup(self.env.stop)
+        # AppTest не умеет перезапускать только фрагмент — полный перезапуск вместо него
+        real_rerun = streamlit.rerun
+        rerun = patch("streamlit.rerun", lambda scope="app": real_rerun())
+        rerun.start()
+        self.addCleanup(rerun.stop)
+        self.app = AppTest.from_function(_server_dialog_script, default_timeout=TIMEOUT)
+
+    def run_dialog(self) -> AppTest:
+        self.app.run()
+        self.assertFalse(self.app.exception, [e.value for e in self.app.exception])
+        return self.app
+
+    def test_connect_form_keeps_values_after_error(self):
+        app = self.run_dialog()
+        values = {"Имя": "serverC", "Адрес сервера": "bad host!", "Пароль": "secret"}
+        for field in app.text_input:
+            if field.label in values:
+                field.set_value(values[field.label])
+        next(b for b in app.button if b.label == "Подключиться").click()
+        self.run_dialog()
+        self.assertTrue(app.error, "ожидалась ошибка проверки адреса")
+        kept = {field.label: field.value for field in app.text_input if field.label in values}
+        self.assertEqual(kept, values)  # ничего не пришлось вводить заново
+
+    def test_manual_tshark_install_then_capture_settings(self):
+        from modules.servers import ServerEntry  # noqa: PLC0415
+        self.app.session_state["new_server"] = {
+            "entry": ServerEntry("serverC", "root", "203.0.113.10", local=self.tmp),
+            "fingerprint": None, "dumpcap": False,
+        }
+        app = self.run_dialog()
+        codes = [code.value for code in app.code]
+        self.assertIn("ssh root@203.0.113.10", codes)
+        self.assertTrue(any("wireshark-cli" in code for code in codes), codes)
+        with patch("modules.servers.has_dumpcap", return_value=False):
+            next(b for b in app.button if b.label == "Проверить установку").click()
+            self.run_dialog()
+        self.assertTrue(any("не найден" in w.value for w in app.warning))
+        with patch("modules.servers.has_dumpcap", return_value=True):
+            next(b for b in app.button if b.label == "Проверить установку").click()
+            self.run_dialog()
+        self.assertIn("Сколько писать", [field.label for field in app.text_input])
+
+    def test_done_step_explains_what_happens_next(self):
+        from modules.servers import ServerEntry  # noqa: PLC0415
+        self.app.session_state["new_server"] = {
+            "entry": ServerEntry("serverC", "root", "203.0.113.10", local=self.tmp),
+            "fingerprint": None, "dumpcap": True,
+            "done": {"duration": "7d", "reserve": 5, "file_mb": 100},
+        }
+        app = self.run_dialog()
+        text = "\n".join(m.value for m in app.markdown)
+        self.assertIn(self.tmp, text)  # куда придут файлы
+        codes = [code.value for code in app.code]
+        for command in ("-DryRun", "-Install -EveryHours 2", "-Uninstall"):
+            self.assertTrue(any(command in code and "ExecutionPolicy Bypass" in code
+                                for code in codes), (command, codes))
+        self.assertIn("Файл живёт", text)  # как выбрать интервал
+        next(b for b in app.button if b.label == "Готово").click()
+        self.run_dialog()
+        self.assertNotIn("new_server", app.session_state)
 
 if __name__ == "__main__":
     unittest.main()
