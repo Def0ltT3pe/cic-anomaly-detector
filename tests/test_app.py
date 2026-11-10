@@ -8,6 +8,7 @@
 import json
 import os
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import numpy as np
@@ -121,8 +122,30 @@ class AppSmokeTests(unittest.TestCase):
             None, directory=self.env["MONITOR_DIR"], log=lambda message: None)
         app = self.run_app()
         labels = [tab.label for tab in app.tabs]
-        self.assertTrue(any("Мониторинг" in label for label in labels), labels)
+        monitoring = next((label for label in labels if "Мониторинг" in label), None)
+        self.assertIsNotNone(monitoring, labels)
+        # Закрытая вкладка не считается
+        self.assertNotIn("За сутки", [metric.label for metric in app.metric])
+        app.session_state["main_tab"] = monitoring
+        self.rerun(app)
         self.assertIn("За сутки", [metric.label for metric in app.metric])
+
+    def test_analysis_survives_switching_tabs(self):
+        app = self.run_app(ssh=True)
+        servers = next(tab.label for tab in app.tabs if "Серверы" in tab.label)
+        app.file_uploader[0].set_value(("flows.csv", synthetic_flows(), "text/csv"))
+        self.rerun(app, ssh=True)
+        next(b for b in app.button if b.label == "Анализировать").click()
+        self.rerun(app, ssh=True)
+        app.segmented_control(key="view").set_value("Потоки")
+        self.rerun(app, ssh=True)
+        app.session_state["main_tab"] = servers
+        self.rerun(app, ssh=True)
+        self.assertEqual(len(app.segmented_control), 0)  # анализ на закрытой вкладке не рисуется
+        app.session_state["main_tab"] = app.tabs[0].label
+        self.rerun(app, ssh=True)
+        self.assertEqual(app.segmented_control(key="view").value, "Потоки")
+        self.assertEqual(len(app.radio(key="flows_filter").options), 3)  # раздел «Потоки» снова на месте
 
     def test_upload_analyze_and_switch_views(self):
         app = self.run_app()
@@ -140,6 +163,12 @@ class AppSmokeTests(unittest.TestCase):
                 app.segmented_control(key="view").set_value(view)
                 self.rerun(app)
                 self.assertEqual(app.segmented_control(key="view").value, view)
+        # Таблица с переходом по клику (на этих данных тревог нет — берём все потоки)
+        app.segmented_control(key="view").set_value("Потоки")
+        self.rerun(app)
+        app.radio(key="flows_filter").set_value("Все потоки")
+        self.rerun(app)
+        self.assertGreaterEqual(len(app.dataframe), 1)
 
     def test_programmatic_jump_to_flow_review(self):
         app = self.run_app()
@@ -153,6 +182,32 @@ class AppSmokeTests(unittest.TestCase):
         self.rerun(app)
         self.assertEqual(app.segmented_control(key="view").value, "Разбор потока")
         self.assertEqual(app.session_state["review_flow"], 7)
+
+
+class _State(dict):
+    """Замена st.session_state: доступ и по ключу, и через атрибут."""
+    __getattr__ = dict.__getitem__
+    __setattr__ = dict.__setitem__
+
+
+class RowClickTests(unittest.TestCase):
+    def setUp(self):
+        import App  # noqa: PLC0415 — модуль приложения, main() не запускается
+        self.app = App
+        self.state = _State()
+        patcher = patch.object(App.st, "session_state", self.state)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_click_opens_flow_review(self):
+        self.state["flows_table_0"] = SimpleNamespace(selection=SimpleNamespace(rows=[1]))
+        self.app._open_selected_flow("flows_table_0", [5, 9, 12])
+        self.assertEqual((self.state["goto_flow"], self.state["goto_view"]), (9, "Разбор потока"))
+
+    def test_cleared_selection_does_nothing(self):
+        self.state["incidents_table"] = SimpleNamespace(selection=SimpleNamespace(rows=[]))
+        self.app._open_selected_flow("incidents_table", [5])
+        self.assertNotIn("goto_flow", self.state)
 
 
 if __name__ == "__main__":
