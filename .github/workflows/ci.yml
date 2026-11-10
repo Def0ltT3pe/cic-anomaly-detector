@@ -12,8 +12,14 @@ permissions:
 
 jobs:
   test:
-    name: Tests (Python 3.12)
+    name: Tests (Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest
+    # Основная версия проекта — 3.12 (Docker, .venv); 3.15 проверяется заранее,
+    # чтобы переход не стал сюрпризом. Падение одной версии не отменяет другую.
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.15"]
 
     steps:
       - name: Checkout
@@ -22,7 +28,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: ${{ matrix.python-version }}
           cache: pip
 
       - name: Install dependencies
