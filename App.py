@@ -1556,6 +1556,7 @@ def _render_server_start(pending: dict, user, role) -> None:
             st.code(st.session_state.new_server_plan, language=None)
         with st.expander("Как это будет работать", icon=":material/help:"):
             st.markdown(_how_it_works(entry, duration, reserve, file_mb))
+            _render_pull_help(entry)
 
 
 # Ручная установка dumpcap: пакет tshark (wireshark-cli) под разные системы
@@ -1649,13 +1650,71 @@ def _how_it_works(entry, duration: str, reserve, file_mb) -> str:
   инциденты появляются во вкладке «Мониторинг серверов» и уходят в Telegram,
   если бот настроен в `.env`.
 
-**Что нужно сделать**
-- Запускать скачивание: вручную — `.\\pull_captures.ps1` в папке проекта, или по
-  расписанию — `.\\pull_captures.ps1 -Install -EveryHours 2` (задача в Планировщике Windows).
-- Запускать чаще, чем заполняется кольцо, иначе старые файлы перезапишутся до
-  скачивания. На сколько хватит кольца, показывает кнопка «Рассчитать место».
-- Состояние записи — кнопка «Статус» на карточке сервера; остановить — меню ⋮ →
-  «Остановить сбор»."""
+Сами по себе файлы на компьютер не приходят: скачивание нужно запускать —
+вручную или по расписанию, как описано ниже. Состояние записи — кнопка «Статус»
+на карточке сервера; остановить запись — меню ⋮ → «Остановить сбор»."""
+
+
+# Скрипты PowerShell Windows по умолчанию не запускает: Bypass — разрешение
+# только на этот запуск, системные настройки не меняются
+PULL_COMMAND = "powershell -ExecutionPolicy Bypass -File .\\pull_captures.ps1"
+
+
+def _render_pull_help(entry) -> None:
+    """Пошагово: как запускать pull_captures.ps1 вручную и по расписанию."""
+    st.subheader("Как скачивать захваты на этот компьютер", divider="gray")
+    st.markdown(
+        "**Шаг 1. Откройте PowerShell в папке проекта.** Нажмите Win+X → «Терминал» "
+        "(или «Windows PowerShell») и перейдите в папку проекта:"
+    )
+    st.code(f'cd "{BASE_DIR}"', language="powershell")
+    st.markdown(
+        "**Шаг 2. Проверьте без скачивания.** Скрипт подключится к серверам из списка "
+        "и покажет, какие файлы скачал бы. Ошибка входа здесь значит, что ключ "
+        "не принят — проверьте сервер кнопкой «Статус»."
+    )
+    st.code(f"{PULL_COMMAND} -DryRun", language="powershell")
+    st.caption(
+        "`-ExecutionPolicy Bypass` нужен потому, что Windows по умолчанию запрещает "
+        "запуск скриптов PowerShell; это разрешение только на один запуск, настройки "
+        "системы не меняются."
+    )
+    st.markdown("**Шаг 3. Выберите, как запускать скачивание.**")
+    manual, scheduled = st.tabs([":material/touch_app: Вручную",
+                                 ":material/schedule: По расписанию"])
+    with manual:
+        st.markdown(
+            f"Запускайте, когда нужны свежие данные. Новые файлы появятся в "
+            f"`{entry.local}`, затем их проверит `monitor.py`, и инциденты будут во "
+            "вкладке «Мониторинг серверов»."
+        )
+        st.code(PULL_COMMAND, language="powershell")
+        st.caption("Минус ручного запуска: если долго не запускать, кольцо на сервере "
+                   "перезапишет старые файлы, и они пропадут, не дойдя до компьютера.")
+    with scheduled:
+        st.markdown(
+            "Одна команда ставит задачу `cic-pull-captures` в Планировщик Windows: "
+            "она сама скачивает и проверяет новые файлы каждые N часов (здесь — 2), "
+            "первый раз — через минуту. Если компьютер спал, задача выполнится "
+            "при пробуждении; выключенный компьютер ничего не скачивает."
+        )
+        st.code(f"{PULL_COMMAND} -Install -EveryHours 2", language="powershell")
+        st.markdown(
+            "Проверить: Пуск → «Планировщик заданий» → «Библиотека планировщика "
+            "заданий» → `cic-pull-captures`. Что происходило при запусках — в файле "
+            "`pull.log` в папке проекта. Убрать задачу:"
+        )
+        st.code(f"{PULL_COMMAND} -Uninstall", language="powershell")
+    st.markdown(
+        "**Как часто запускать.** Чаще, чем заполняется кольцо на сервере: когда оно "
+        "полное, самый старый файл перезаписывается — если его ещё не скачали, он "
+        "потерян. Сколько файл живёт в кольце, зависит от трафика сервера. Узнать: "
+        "примерно через час записи откройте «Мониторинг серверов» → этот сервер → "
+        "«Сбор на сервере» → «Обновить», показатель «Файл живёт». Интервал "
+        "`-EveryHours` берите хотя бы вдвое меньше; если не уверены — 2 часа "
+        "подходят большинству серверов. Поменять интервал — снова `-Install` "
+        "с другим числом."
+    )
 
 
 def _render_server_done(pending: dict) -> None:
@@ -1665,6 +1724,7 @@ def _render_server_done(pending: dict) -> None:
     st.success(f"{entry.name}: сбор запущен, сервер добавлен в список.",
                icon=":material/check_circle:")
     st.markdown(_how_it_works(entry, done["duration"], done["reserve"], done["file_mb"]))
+    _render_pull_help(entry)
     if st.button("Готово", type="primary", icon=":material/done:"):
         st.session_state.pop("new_server", None)
         st.rerun()

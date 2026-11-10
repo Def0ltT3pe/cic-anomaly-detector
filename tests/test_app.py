@@ -223,8 +223,12 @@ class AddServerDialogTests(unittest.TestCase):
         }
         app = self.run_dialog()
         text = "\n".join(m.value for m in app.markdown)
-        self.assertIn("pull_captures.ps1", text)
-        self.assertIn(self.tmp, text)
+        self.assertIn(self.tmp, text)  # куда придут файлы
+        codes = [code.value for code in app.code]
+        for command in ("-DryRun", "-Install -EveryHours 2", "-Uninstall"):
+            self.assertTrue(any(command in code and "ExecutionPolicy Bypass" in code
+                                for code in codes), (command, codes))
+        self.assertIn("Файл живёт", text)  # как выбрать интервал
         next(b for b in app.button if b.label == "Готово").click()
         self.run_dialog()
         self.assertNotIn("new_server", app.session_state)
