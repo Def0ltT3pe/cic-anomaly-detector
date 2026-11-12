@@ -5,6 +5,7 @@ from __future__ import annotations
 import functools
 import hmac
 import logging
+import mimetypes
 import os
 import shutil
 import sys
@@ -393,16 +394,26 @@ def _load_uploads(files) -> tuple[pd.DataFrame, pd.DataFrame | None]:
     return df, pd.concat(pcap_frames, ignore_index=True)
 
 
-def _flow_title(result: DetectionResult, index: int, brute, brute_probs) -> str:
-    row = result.df.iloc[index]
-    parts = [f"#{index}"]
-    if all(column in row.index for column in ("Src IP", "Dst IP", "Dst Port")):
-        parts.append(f"{row['Src IP']} → {row['Dst IP']}:{row['Dst Port']}")
-    if brute is not None and brute_probs is not None and brute_probs[index] >= brute.threshold:
-        parts.append(f"{brute.display_name} p={brute_probs[index]:.2f}")
-    if result.mask[index]:
-        parts.append(f"IF {result.scores[index]:.3f}")
-    return " · ".join(parts)
+def _flow_titles(result: DetectionResult, indices: list[int], brute, brute_probs) -> dict[int, str]:
+    """Подписи потоков для списка тревог: колонки берутся целиком, а не строкой
+    df.iloc на каждый поток (на 500 тревогах — в десятки раз быстрее)."""
+    df = result.df
+    peers = {}
+    if all(column in df.columns for column in ("Src IP", "Dst IP", "Dst Port")):
+        rows = np.asarray(indices, dtype=int)
+        columns = (df[name].to_numpy()[rows] for name in ("Src IP", "Dst IP", "Dst Port"))
+        peers = {index: f"{src} → {dst}:{port}" for index, src, dst, port in zip(indices, *columns)}
+    titles = {}
+    for index in indices:
+        parts = [f"#{index}"]
+        if index in peers:
+            parts.append(peers[index])
+        if brute is not None and brute_probs is not None and brute_probs[index] >= brute.threshold:
+            parts.append(f"{brute.display_name} p={brute_probs[index]:.2f}")
+        if result.mask[index]:
+            parts.append(f"IF {result.scores[index]:.3f}")
+        titles[index] = " · ".join(parts)
+    return titles
 
 
 def _ask_llm(
@@ -448,7 +459,7 @@ def _render_flow_review(
     candidates = _memo(cache, "candidates",
                        lambda: flagged_candidates(result, brute_probs, brute_mask))
     titles = _memo(cache, "titles",
-                   lambda: {i: _flow_title(result, i, brute, brute_probs) for i in candidates})
+                   lambda: _flow_titles(result, candidates, brute, brute_probs))
     target = st.session_state.pop("goto_flow", None)
     if target is None and "flow_mode" not in st.session_state:
         # Streamlit забывает виджеты скрытой вкладки — возвращаем прежний поток
@@ -481,10 +492,10 @@ def _render_flow_review(
     report_kwargs = dict(
         brute=brute, brute_probs=brute_probs, brute_mask=brute_mask, incidents=incidents
     )
-    report = build_flow_report(result, index, means, stds, mask_ips=False, **report_kwargs)
-    in_incident = incidents is not None and bool(len(incidents)) and bool(
-        incidents["rows"].apply(lambda rows: index in rows).any()
-    )
+    # Отчёт проходит по адресам всего файла — один раз на поток, а не на каждый клик
+    report = _memo(cache, ("report", index), lambda: build_flow_report(
+        result, index, means, stds, mask_ips=False, **report_kwargs))
+    in_incident = index in _memo(cache, "incident_rows", lambda: _incident_rows(incidents))
     level, text = model_verdict(
         bool(result.mask[index]),
         bool(brute_mask[index]) if brute_mask is not None else None,
@@ -501,10 +512,11 @@ def _render_flow_review(
     facts, chart = st.columns([3, 2])
     with facts.expander("Факты о потоке", expanded=True):
         st.markdown(report)
-    deviations = feature_deviations(result.X.iloc[index], means, stds, TOP_FEATURES_CHART)
+    deviations = _memo(cache, ("deviations", index), lambda: feature_deviations(
+        result.X.iloc[index], means, stds, TOP_FEATURES_CHART))
     if not deviations.empty:
         chart.caption("Чем поток отличается от нормы (наведите на столбец)")
-        chart.altair_chart(deviation_chart(deviations, _theme()), width="stretch")
+        _chart(chart, "deviation", deviations)
 
     for message in chat:
         with st.chat_message(message["role"]):
@@ -533,7 +545,8 @@ def _render_flow_review(
         st.caption("В LLM уходят признаки и решения моделей; адреса замаскированы.")
         question = question.strip() or ("" if chat else DEFAULT_QUESTION)
         if asked and question:
-            masked = build_flow_report(result, index, means, stds, mask_ips=True, **report_kwargs)
+            masked = _memo(cache, ("masked_report", index), lambda: build_flow_report(
+                result, index, means, stds, mask_ips=True, **report_kwargs))
             api_key = st.session_state.llm_keys.get(provider)
             if _ask_llm(user, role, provider, api_key, chat, question, masked, index):
                 st.rerun()  # история над формой, как при следующих вопросах
@@ -555,6 +568,13 @@ def _render_flow_review(
         mime="text/markdown",
         key=f"report_{index}",
     )
+
+
+def _incident_rows(incidents) -> set[int]:
+    """Все потоки, вошедшие в инциденты."""
+    if incidents is None or not len(incidents):
+        return set()
+    return {int(row) for rows in incidents["rows"] for row in rows}
 
 
 def _compute_brute(result: DetectionResult, brute):
@@ -597,10 +617,30 @@ def _derived(result: DetectionResult, brute, brute_payload) -> dict:
     return cache
 
 
-def _memo(cache: dict, name: str, compute):
+def _memo(cache: dict, name, compute):
     if name not in cache:
         cache[name] = compute()
     return cache[name]
+
+
+# Altair -> Vega-Lite так же, как внутри st.altair_chart (функция Streamlit не
+# публичная: если её изменят, это поймает тест test_chart_specs)
+from streamlit.elements.vega_charts import _convert_altair_to_vega_lite_spec  # noqa: E402
+
+_CHARTS = {"timeline": timeline_chart, "top": top_chart, "deviation": deviation_chart,
+          "daily": daily_chart, "hourly": hourly_chart}
+
+
+@st.cache_data(show_spinner=False, max_entries=128)
+def _chart_spec(kind: str, data: pd.DataFrame, args: tuple, theme: str | None) -> dict:
+    return _convert_altair_to_vega_lite_spec(_CHARTS[kind](data, *args, theme))
+
+
+def _chart(container, kind: str, data: pd.DataFrame, *args) -> None:
+    """График из modules.charts. Спецификация Vega-Lite кэшируется по данным и теме:
+    сборка графика Altair и проверка его схемы — 0,05–0,1 с на график при каждой
+    перерисовке, а данные графиков между кликами почти никогда не меняются."""
+    container.vega_lite_chart(_chart_spec(kind, data, args, _theme()), width="stretch")
 
 
 VERDICT_WORDS = {
@@ -680,7 +720,7 @@ def _render_overview(
     if timeline is None:
         st.caption("В файле нет времени потоков (Timestamp) — график недоступен.")
     else:
-        st.altair_chart(timeline_chart(timeline, list(masks), _theme()), width="stretch")
+        _chart(st, "timeline", timeline, list(masks))
 
     flagged = brute_mask if brute_mask is not None else result.mask
     source = brute.display_name if brute_mask is not None else "IsolationForest"
@@ -694,9 +734,9 @@ def _render_overview(
     if peers.empty:
         left.caption("Тревог нет.")
         return
-    left.altair_chart(top_chart(peers, "Адрес", _theme()), width="stretch")
+    _chart(left, "top", peers, "Адрес")
     ports = _memo(cache, "ports", lambda: top_ports(result.df, flagged))
-    right.altair_chart(top_chart(ports, "Порт", _theme()), width="stretch")
+    _chart(right, "top", ports, "Порт")
 
 
 def _incident_table(incidents: pd.DataFrame, brute_probs) -> pd.DataFrame:
@@ -893,7 +933,7 @@ def _select_llm_provider(user, role) -> str | None:
         "LLM для разбора",
         options,
         index=options.index(current) if current in options else 0,
-        format_func=lambda i: provider_label(i) + ("" if i in ready else " — нужен ключ"),
+        format_func=lambda i: registry[i].label + ("" if i in ready else " — нужен ключ"),
     )
     if provider not in ready:
         st.caption(
@@ -1111,6 +1151,10 @@ def _render_header(entry: ModelEntry | None) -> None:
 
 
 def main() -> None:
+    if not mimetypes.inited:
+        # Первая кнопка «Скачать» читает типы файлов из реестра Windows (~0,5 с) —
+        # пусть это случится при запуске сервера, а не при клике пользователя
+        mimetypes.init()
     _init_state()
     _login_screen()
 
@@ -1191,6 +1235,11 @@ def _cached_ports(directory: str, name: str, local_ip: str | None, stamp) -> pd.
     return mon.attacked_ports(directory, name, local_ip)
 
 
+@st.cache_data(show_spinner=False, max_entries=32)
+def _cached_attackers(incidents: pd.DataFrame) -> pd.DataFrame:
+    return mon.top_attackers(incidents)
+
+
 @st.cache_data(show_spinner=False, ttl=60)
 def _last_download(local: str):
     """Поиск свежего захвата обходит всю папку сервера — не чаще раза в минуту."""
@@ -1264,7 +1313,7 @@ def _render_monitoring(incidents: pd.DataFrame, updated, user=None, role=None) -
         return
 
     st.markdown("##### Инциденты по дням")
-    st.altair_chart(daily_chart(daily_counts(incidents), _theme()), width="stretch")
+    _chart(st, "daily", daily_counts(incidents))
     view = incidents.sort_values("window_start", ascending=False).rename(columns={
         "server": "Сервер", "window_start": "Час", "peer": "Адрес", "flows": "Потоков",
         "services": "Порты сервера", "max_proba": "Макс. вероятность", "first_seen": "Первый",
@@ -1339,15 +1388,15 @@ def _render_server_stats(name, entry, incidents, user, role) -> None:
                    help="Когда pull_captures.ps1 последний раз скачал файл захвата")
     if len(traffic):
         left, right = st.columns(2)
-        left.altair_chart(hourly_chart(traffic, "Потоков", "blue", _theme()), width="stretch")
-        right.altair_chart(hourly_chart(traffic, "Тревог", "orange", _theme()), width="stretch")
+        _chart(left, "hourly", traffic, "Потоков", "blue")
+        _chart(right, "hourly", traffic, "Тревог", "orange")
         if not traffic["Потоков"].any():
             st.caption("Все потоки по часам monitor.py считает с этой версии: "
                        "график заполнится после следующей проверки.")
     else:
         st.caption("monitor.py ещё не проверял захваты этого сервера.")
 
-    attackers = mon.top_attackers(incidents)
+    attackers = _cached_attackers(incidents)
     ports = _attacked_ports(directory, name, mon.load_state(directory)["local_ip"].get(name))
     left, right = st.columns([3, 2])
     with left:
@@ -1360,7 +1409,7 @@ def _render_server_stats(name, entry, incidents, user, role) -> None:
     with right:
         st.markdown("##### Порты под ударом")
         if len(ports):
-            st.altair_chart(top_chart(ports, "Порт", _theme()), width="stretch")
+            _chart(st, "top", ports, "Порт")
         else:
             st.caption("Тревог нет.")
 

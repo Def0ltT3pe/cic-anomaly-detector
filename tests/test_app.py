@@ -204,6 +204,42 @@ class RowClickTests(unittest.TestCase):
         self.app._open_selected_flow("flows_table_0", [5, 9, 12])
         self.assertEqual((self.state["goto_flow"], self.state["goto_view"]), (9, "Разбор потока"))
 
+    def test_flow_titles(self):
+        df = pd.DataFrame({"Src IP": ["203.0.113.1", "203.0.113.2", "203.0.113.3"],
+                           "Dst IP": "10.0.0.1", "Dst Port": [22, 443, 80]})
+        result = SimpleNamespace(df=df, mask=np.array([True, False, True]),
+                                 scores=np.array([-0.1234, 0.2, -0.05]))
+        brute = SimpleNamespace(threshold=0.5, display_name="RF")
+        probs = np.array([0.91, 0.7, 0.1])
+        titles = self.app._flow_titles(result, [2, 0, 1], brute, probs)  # порядок — как в списке
+        self.assertEqual(titles, {
+            2: "#2 · 203.0.113.3 → 10.0.0.1:80 · IF -0.050",
+            0: "#0 · 203.0.113.1 → 10.0.0.1:22 · RF p=0.91 · IF -0.123",
+            1: "#1 · 203.0.113.2 → 10.0.0.1:443 · RF p=0.70",
+        })
+        bare = SimpleNamespace(df=df.drop(columns=["Dst Port"]), mask=result.mask, scores=result.scores)
+        self.assertEqual(self.app._flow_titles(bare, [1, 0], None, None), {1: "#1", 0: "#0 · IF -0.123"})
+
+    def test_chart_specs(self):
+        # Все графики проходят через внутреннюю функцию Streamlit: если её изменят — тест упадёт
+        when = pd.date_range("2026-11-01", periods=3, freq="h")
+        cases = {
+            "timeline": (pd.DataFrame({"Время": when.repeat(2), "Модель": ["IF", "RF"] * 3,
+                                       "Тревог": [1, 2, 0, 1, 3, 0]}), ["IF", "RF"]),
+            "top": (pd.DataFrame({"Адрес": ["203.0.113.1"], "Тревог": [3]}), "Адрес"),
+            "deviation": (pd.DataFrame({"feature": ["a", "b"], "value": [5.0, 1.0], "mean": [1.0, 2.0],
+                                        "z": [3.0, -1.0], "ratio": [5.0, 0.5]}),),
+            "daily": (pd.DataFrame({"День": when.normalize()[:1], "Инцидентов": [2]}),),
+            "hourly": (pd.DataFrame({"Час": when, "Потоков": [5, 6, 7], "Тревог": [0, 1, 0]}),
+                       "Потоков", "blue"),
+        }
+        self.assertEqual(set(cases), set(self.app._CHARTS))
+        for kind, (data, *args) in cases.items():
+            for theme in ("dark", "light"):
+                with self.subTest(kind=kind, theme=theme):
+                    spec = self.app._chart_spec(kind, data, tuple(args), theme)
+                    self.assertTrue(spec["datasets"], kind)  # данные графика внутри спецификации
+
     def test_cleared_selection_does_nothing(self):
         self.state["incidents_table"] = SimpleNamespace(selection=SimpleNamespace(rows=[]))
         self.app._open_selected_flow("incidents_table", [5])

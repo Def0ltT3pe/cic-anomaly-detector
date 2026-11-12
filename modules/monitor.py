@@ -359,14 +359,17 @@ def daily_counts(incidents: pd.DataFrame, days: int = RETAIN_DAYS, today=None) -
 def server_traffic(directory: str, name: str) -> pd.DataFrame:
     """По часам: всего потоков и тревожных (из истории monitor.py)."""
     hourly = load_hourly(directory, name)
+    # Пустые ряды — тоже по времени: у сервера, который monitor.py ещё не проверял,
+    # иначе колонка «Час» выходит целочисленной и сравнение со временем падает
+    empty = pd.Series(dtype="int64", index=pd.DatetimeIndex([]))
     totals = (hourly.groupby(pd.to_datetime(hourly["hour"]))["flows"].sum()
-              if len(hourly) else pd.Series(dtype="int64"))
+              if len(hourly) else empty)
     path = os.path.join(directory, name, FLAGGED_FILE)
     # Нужно только время — остальные колонки истории не читаются
     flagged = (pd.read_parquet(path, columns=["Timestamp"]) if os.path.isfile(path)
                else pd.DataFrame(columns=FLAGGED_COLUMNS))
     alerts = (pd.to_datetime(flagged["Timestamp"]).dt.floor("h").value_counts()
-              if len(flagged) else pd.Series(dtype="int64"))
+              if len(flagged) else empty)
     index = totals.index.union(alerts.index).sort_values()
     return pd.DataFrame({
         "Час": index,
