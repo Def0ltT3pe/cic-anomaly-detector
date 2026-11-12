@@ -52,11 +52,48 @@ class FakeChat(BaseHTTPRequestHandler):
         pass
 
 
+REAL_SECRET = llm_explain._secret  # до подмены в setUpModule
+
+
 def setUpModule():
     # локальный .streamlit/secrets.toml не должен влиять на тесты
     patcher = patch.object(llm_explain, "_secret", return_value="")
     patcher.start()
     unittest.addModuleCleanup(patcher.stop)
+
+
+class SecretsTests(unittest.TestCase):
+    def setUp(self):
+        llm_explain._secrets_cache = (float("-inf"), {})
+        self.addCleanup(setattr, llm_explain, "_secrets_cache", (float("-inf"), {}))
+
+    def test_lookup_forms(self):
+        secrets = {"GEMINI_API_KEY": " a ", "gemini_model": "m", "openai": {"base_url": "u"},
+                   "claude": "not a section"}
+        with patch.object(llm_explain, "_secrets", return_value=secrets):
+            self.assertEqual(REAL_SECRET("GEMINI_API_KEY"), "a")
+            self.assertEqual(REAL_SECRET("GEMINI_MODEL"), "m")
+            self.assertEqual(REAL_SECRET("OPENAI_BASE_URL"), "u")
+            self.assertEqual(REAL_SECRET("CLAUDE_MODEL"), "")
+            self.assertEqual(REAL_SECRET("DEEPSEEK_API_KEY"), "")
+
+    def test_snapshot_is_reread_after_ttl(self):
+        calls = []
+        fake = type("Secrets", (), {"to_dict": lambda self: calls.append(1) or {"x": str(len(calls))}})()
+        clock = [100.0]
+        with patch("streamlit.secrets", fake), \
+                patch.object(llm_explain.time, "monotonic", lambda: clock[0]):
+            self.assertEqual(llm_explain._secrets(), {"x": "1"})
+            clock[0] += llm_explain.SECRETS_TTL / 2
+            self.assertEqual(llm_explain._secrets(), {"x": "1"})  # из снимка
+            clock[0] += llm_explain.SECRETS_TTL
+            self.assertEqual(llm_explain._secrets(), {"x": "2"})  # перечитано
+        self.assertEqual(len(calls), 2)
+
+    def test_unreadable_secrets_are_empty(self):
+        broken = type("Secrets", (), {"to_dict": lambda self: 1 / 0})()
+        with patch("streamlit.secrets", broken):
+            self.assertEqual(llm_explain._secrets(), {})
 
 
 class ProviderTests(unittest.TestCase):

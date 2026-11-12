@@ -47,7 +47,9 @@ class BruteForceDetector:
             raise BruteForceError(
                 "Для BruteForce-модели не хватает колонок: " + ", ".join(missing[:10])
             )
-        proba = self.model.predict_proba(X[self.feature_cols])
+        # Без копии, если колонки уже те и в том же порядке (так из detect_anomalies)
+        features = X if list(X.columns) == self.feature_cols else X[self.feature_cols]
+        proba = self.model.predict_proba(features)
         return np.asarray(proba[:, 1], dtype=float)
 
     def mask(self, X: pd.DataFrame) -> np.ndarray:

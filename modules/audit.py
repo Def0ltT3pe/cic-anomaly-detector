@@ -73,13 +73,33 @@ def log_event(user: str | None, role: str | None, action: str, **details) -> Non
         logger.warning("Не удалось записать аудит в %s: %s", audit_path(), exc)
 
 
+def _tail_lines(path: str, limit: int, block: int = 64 * 1024) -> list[str]:
+    """Последние limit строк файла: читается конец, а не весь журнал — он растёт
+    без ограничений, а панель аудита перерисовывается на каждый клик."""
+    with open(path, "rb") as handle:
+        handle.seek(0, os.SEEK_END)
+        size = handle.tell()
+        chunk = b""
+        while True:
+            start = max(0, size - block)
+            handle.seek(start)
+            chunk = handle.read(size - start)
+            # первая строка куска может быть неполной — нужно на одну строку больше
+            if start == 0 or chunk.count(b"\n") > limit:
+                break
+            block *= 4
+    lines = chunk.decode("utf-8", errors="replace").splitlines(keepends=True)
+    if start > 0:
+        lines = lines[1:]
+    return list(deque(lines, maxlen=limit))
+
+
 def read_recent(limit: int = 20) -> list[dict]:
     path = audit_path()
     if limit < 1 or not os.path.isfile(path):
         return []
     try:
-        with open(path, encoding="utf-8") as handle:
-            lines = deque(handle, maxlen=limit)
+        lines = _tail_lines(path, limit)
     except OSError as exc:
         logger.warning("Не удалось прочитать аудит %s: %s", path, exc)
         return []

@@ -359,12 +359,17 @@ def daily_counts(incidents: pd.DataFrame, days: int = RETAIN_DAYS, today=None) -
 def server_traffic(directory: str, name: str) -> pd.DataFrame:
     """По часам: всего потоков и тревожных (из истории monitor.py)."""
     hourly = load_hourly(directory, name)
+    # Пустые ряды — тоже по времени: у сервера, который monitor.py ещё не проверял,
+    # иначе колонка «Час» выходит целочисленной и сравнение со временем падает
+    empty = pd.Series(dtype="int64", index=pd.DatetimeIndex([]))
     totals = (hourly.groupby(pd.to_datetime(hourly["hour"]))["flows"].sum()
-              if len(hourly) else pd.Series(dtype="int64"))
+              if len(hourly) else empty)
     path = os.path.join(directory, name, FLAGGED_FILE)
-    flagged = pd.read_parquet(path) if os.path.isfile(path) else pd.DataFrame(columns=FLAGGED_COLUMNS)
+    # Нужно только время — остальные колонки истории не читаются
+    flagged = (pd.read_parquet(path, columns=["Timestamp"]) if os.path.isfile(path)
+               else pd.DataFrame(columns=FLAGGED_COLUMNS))
     alerts = (pd.to_datetime(flagged["Timestamp"]).dt.floor("h").value_counts()
-              if len(flagged) else pd.Series(dtype="int64"))
+              if len(flagged) else empty)
     index = totals.index.union(alerts.index).sort_values()
     return pd.DataFrame({
         "Час": index,
@@ -399,7 +404,7 @@ def attacked_ports(directory: str, name: str, local_ip: str | None, n: int = 10)
     path = os.path.join(directory, name, FLAGGED_FILE)
     if not local_ip or not os.path.isfile(path):
         return pd.DataFrame(columns=["Порт", "Тревог"])
-    flagged = pd.read_parquet(path)
+    flagged = pd.read_parquet(path, columns=["Src IP", "Src Port", "Dst Port"])
     outbound = flagged["Src IP"].astype(str) == local_ip
     ports = flagged["Src Port"].where(outbound, flagged["Dst Port"]).astype(int)
     counts = ports.value_counts().head(n)

@@ -3,7 +3,10 @@ import unittest
 import numpy as np
 import pandas as pd
 
-from modules.pipeline import FeatureValidationError, prepare_features
+from sklearn.ensemble import IsolationForest
+from sklearn.preprocessing import StandardScaler
+
+from modules.pipeline import FeatureValidationError, detect_anomalies, prepare_features
 
 
 class PrepareFeaturesTests(unittest.TestCase):
@@ -62,6 +65,21 @@ class PrepareFeaturesTests(unittest.TestCase):
         )
         with self.assertRaises(FeatureValidationError):
             prepare_features(df, self.cols)
+
+
+class DetectAnomaliesTests(unittest.TestCase):
+    def test_isolation_forest_single_pass_matches_predict(self):
+        rng = np.random.default_rng(0)
+        cols = ["a", "b", "c"]
+        df = pd.DataFrame(rng.normal(size=(300, 3)), columns=cols)
+        df.iloc[:10] *= 8  # явные выбросы
+        scaler = StandardScaler().fit(df)
+        model = IsolationForest(random_state=0, contamination=0.05).fit(scaler.transform(df))
+        result = detect_anomalies(df, model, scaler, None, cols)
+        X = scaler.transform(df)
+        np.testing.assert_array_equal(result.predictions, model.predict(X))
+        np.testing.assert_array_equal(result.scores, model.decision_function(X))
+        self.assertGreater(result.n_anomalies, 0)
 
 
 if __name__ == "__main__":
