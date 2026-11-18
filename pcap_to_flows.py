@@ -155,7 +155,12 @@ def _int(value: str, default: int = 0) -> int:
     if not value:
         return default
     try:
-        return int(value, 0) if value.startswith("0x") else int(float(value))
+        if value.startswith("0x"):
+            return int(value, 0)
+        try:
+            return int(value)  # почти все поля — целые: без float() быстрее
+        except ValueError:
+            return int(float(value))
     except ValueError:
         return default
 
@@ -198,8 +203,9 @@ def _stats(values: np.ndarray) -> tuple[float, float, float, float]:
 
 def _active_idle(times: np.ndarray) -> tuple[list, list]:
     active, idle = [], []
-    start = end = times[0]
-    for t in times[1:]:
+    values = times.tolist()  # обычные int: цикл по numpy-скалярам в разы медленнее
+    start = end = values[0]
+    for t in values[1:]:
         if t - end > ACTIVITY_TIMEOUT_US:
             if end - start > 0:
                 active.append(end - start)
@@ -219,17 +225,22 @@ def flow_features(flow: Flow) -> dict:
     header = np.asarray(flow.headers, dtype=float)
     flags = np.asarray(flow.flags, dtype=np.int64)
 
+    # Выборки по направлениям — один раз: те же массивы, те же вычисления ниже
+    bwd = ~fwd
+    fwd_payload, bwd_payload = payload[fwd], payload[bwd]
+    fwd_header = header[fwd]
+
     duration = int(times[-1] - times[0])
     seconds = duration / 1e6
-    n_fwd, n_bwd = int(fwd.sum()), int((~fwd).sum())
-    fwd_bytes, bwd_bytes = float(payload[fwd].sum()), float(payload[~fwd].sum())
+    n_fwd, n_bwd = int(fwd.sum()), int(bwd.sum())
+    fwd_bytes, bwd_bytes = float(fwd_payload.sum()), float(bwd_payload.sum())
 
-    fwd_mean, fwd_std, fwd_max, fwd_min = _stats(payload[fwd])
-    bwd_mean, bwd_std, bwd_max, bwd_min = _stats(payload[~fwd])
+    fwd_mean, fwd_std, fwd_max, fwd_min = _stats(fwd_payload)
+    bwd_mean, bwd_std, bwd_max, bwd_min = _stats(bwd_payload)
     pkt_mean, pkt_std, pkt_max, pkt_min = _stats(payload)
     flow_iat = _stats(np.diff(times).astype(float))
     fwd_iat_values = np.diff(times[fwd]).astype(float)
-    bwd_iat_values = np.diff(times[~fwd]).astype(float)
+    bwd_iat_values = np.diff(times[bwd]).astype(float)
     fwd_iat = _stats(fwd_iat_values)
     bwd_iat = _stats(bwd_iat_values)
     active, idle = _active_idle(times)
@@ -278,9 +289,9 @@ def flow_features(flow: Flow) -> dict:
         "Bwd IAT Std": bwd_iat[1],
         "Bwd IAT Max": bwd_iat[2],
         "Bwd IAT Min": bwd_iat[3],
-        "Fwd PSH Flags": int(bool((flags[fwd] & PSH).any())),
-        "Fwd Header Length": float(header[fwd].sum()),
-        "Bwd Header Length": float(header[~fwd].sum()),
+        "Fwd PSH Flags": int(bool(np.bitwise_or.reduce(flags[fwd]) & PSH)) if n_fwd else 0,
+        "Fwd Header Length": float(fwd_header.sum()),
+        "Bwd Header Length": float(header[bwd].sum()),
         "Fwd Packets/s": rate(n_fwd),
         "Bwd Packets/s": rate(n_bwd),
         "Packet Length Min": pkt_min,
@@ -299,8 +310,8 @@ def flow_features(flow: Flow) -> dict:
         "Subflow Bwd Bytes": bwd_bytes,
         "Init Fwd Win Bytes": flow.init_fwd_win,
         "Init Bwd Win Bytes": flow.init_bwd_win,
-        "Fwd Act Data Packets": int((payload[fwd] > 0).sum()),
-        "Fwd Seg Size Min": float(header[fwd].min()) if n_fwd else 0.0,
+        "Fwd Act Data Packets": int((fwd_payload > 0).sum()),
+        "Fwd Seg Size Min": float(fwd_header.min()) if n_fwd else 0.0,
         "Active Mean": active_stats[0],
         "Active Std": active_stats[1],
         "Active Max": active_stats[2],
@@ -310,9 +321,16 @@ def flow_features(flow: Flow) -> dict:
         "Idle Max": idle_stats[2],
         "Idle Min": idle_stats[3],
     }
+    seen = int(np.bitwise_or.reduce(flags))  # все флаги потока разом вместо 7 проходов
     for name, bit in FLAG_FEATURES.items():
-        row[name] = int(bool((flags & bit).any()))
+        row[name] = int(bool(seen & bit))
     return row
+
+
+def _is_short(flow: Flow) -> bool:
+    """Один пакет или длительность ≤ 0 (время пакетов в захвате бывает
+    не по порядку) — как в drop_short_flows."""
+    return len(flow.times) < 2 or flow.times[-1] <= flow.times[0]
 
 
 def build_flows(packets) -> pd.DataFrame:
@@ -320,14 +338,31 @@ def build_flows(packets) -> pd.DataFrame:
 
     packets — DataFrame или итератор словарей (PacketReader) с полями tshark.
     """
+    return _build_flows(packets, keep_short=True)[0]
+
+
+def _build_flows(packets, keep_short: bool) -> tuple[pd.DataFrame, int]:
+    """Потоки и число отброшенных коротких. keep_short=False сразу отбрасывает
+    потоки, которые убрал бы drop_short_flows: их признаки не считаются
+    (на реальных захватах это около трети потоков)."""
     active: dict[tuple, Flow] = {}
-    rows: list[dict] = []
+    rows: list[tuple] = []
+    columns: list[str] = []
+    skipped = 0
     if isinstance(packets, pd.DataFrame):
         packets = packets.to_dict("records")
 
     def finish(flow: Flow) -> None:
-        # Признаки сразу, а пакеты потока — в сборщик мусора
-        rows.append(flow_features(flow))
+        nonlocal skipped
+        if not keep_short and _is_short(flow):
+            skipped += 1
+            return
+        # Признаки сразу, а пакеты потока — в сборщик мусора; строка — кортеж,
+        # а не словарь: на десятках тысяч потоков это заметно меньше памяти
+        row = flow_features(flow)
+        if not columns:
+            columns.extend(row)
+        rows.append(tuple(row.values()))
 
     for number, record in enumerate(packets, start=1):
         src = record["ip_src"] or record["ipv6_src"]
@@ -347,7 +382,9 @@ def build_flows(packets) -> pd.DataFrame:
             header, flags, window = UDP_HEADER, 0, -1
         time_us = int(round(float(record["frame_time_epoch"]) * 1e6))
 
-        key = (proto,) + tuple(sorted([(src, sport), (dst, dport)]))
+        # Ключ не зависит от направления: меньшая пара (адрес, порт) — первой
+        side_a, side_b = (src, sport), (dst, dport)
+        key = (proto, side_a, side_b) if side_a <= side_b else (proto, side_b, side_a)
         flow = active.get(key)
         if flow is not None and time_us - flow.start > FLOW_TIMEOUT_US:
             finish(active.pop(key))
@@ -370,9 +407,20 @@ def build_flows(packets) -> pd.DataFrame:
     for flow in active.values():
         finish(flow)
     if not rows:
+        if skipped:  # потоки были, но все короткие — пустая таблица, как после drop_short_flows
+            return pd.DataFrame(columns=_feature_columns()), skipped
         raise ConversionError("В захвате нет TCP/UDP-потоков.")
-    frame = pd.DataFrame(rows).sort_values("Timestamp", kind="stable").reset_index(drop=True)
-    return frame
+    frame = pd.DataFrame(rows, columns=columns).sort_values("Timestamp", kind="stable")
+    return frame.reset_index(drop=True), skipped
+
+
+def _feature_columns() -> list[str]:
+    """Порядок колонок flow_features — по одному служебному потоку. Нужен, только
+    если все потоки короткие: их признаки ради одних имён колонок не считаются."""
+    probe = Flow("0.0.0.0", "0.0.0.0", 0, 0, 6, start=0)
+    probe.add(0, True, 0, 20, 0, 0)
+    probe.add(1, False, 0, 20, 0, 0)
+    return list(flow_features(probe))
 
 
 def drop_short_flows(flows: pd.DataFrame) -> tuple[pd.DataFrame, int]:
@@ -412,10 +460,8 @@ def convert_pcap(path: str, tshark: str, keep_short: bool = False, progress=None
                 progress(reader.count)
             yield packet
 
-    flows = build_flows(packets())
-    stats = ConversionStats(packets=reader.count, warning=reader.warning)
-    if not keep_short:
-        flows, stats.dropped = drop_short_flows(flows)
+    flows, dropped = _build_flows(packets(), keep_short=keep_short)
+    stats = ConversionStats(packets=reader.count, warning=reader.warning, dropped=dropped)
     stats.flows = len(flows)
     return flows, stats
 

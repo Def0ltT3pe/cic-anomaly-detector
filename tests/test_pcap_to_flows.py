@@ -9,6 +9,8 @@ from pcap_to_flows import (
     FLOW_TIMEOUT_US,
     META_COLUMNS,
     ConversionError,
+    _build_flows,
+    _int,
     build_flows,
     convert_pcap,
     drop_short_flows,
@@ -107,6 +109,31 @@ class BuildFlowsTests(unittest.TestCase):
         self.assertEqual(dropped, 2)
         self.assertEqual(flows["Src IP"].tolist(), ["10.0.0.8"])
         self.assertFalse(np.isinf(flows["Flow Bytes/s"]).any())
+
+    def test_skipping_short_flows_matches_drop_short_flows(self):
+        rows = [udp(0, "10.0.0.5", "10.0.0.6", 1, 2, 10)]                     # 1 пакет
+        rows += [udp(1, "10.0.0.7", "10.0.0.6", 3, 4, 10)] * 2                # дубль: 0 мкс
+        rows += [udp(t, "10.0.0.8", "10.0.0.6", 5, 6, 10) for t in (2, 3)]    # нормальный
+        rows += [tcp(t, "10.0.0.9", "10.0.0.6", 7, 22, "0x0018", 5) for t in (4, 5, 6)]
+        rows += [udp(t, "10.0.0.10", "10.0.0.6", 8, 9, 10) for t in (8, 7)]  # время назад
+        expected, expected_dropped = drop_short_flows(build_flows(frame(rows)))
+        flows, dropped = _build_flows(frame(rows), keep_short=False)
+        self.assertEqual(dropped, expected_dropped)
+        pd.testing.assert_frame_equal(flows, expected.reset_index(drop=True))
+
+    def test_only_short_flows_give_empty_table(self):
+        rows = [udp(0, "10.0.0.5", "10.0.0.6", 1, 2, 10)]
+        flows, dropped = _build_flows(frame(rows), keep_short=False)
+        self.assertEqual(dropped, 1)
+        self.assertEqual(len(flows), 0)
+        self.assertEqual(list(flows.columns), list(build_flows(frame(rows)).columns))
+
+    def test_int_parsing(self):
+        self.assertEqual(_int("0x0012"), 18)
+        self.assertEqual(_int("443"), 443)
+        self.assertEqual(_int("1.9"), 1)  # как int(float(...)) раньше
+        self.assertEqual(_int("", 7), 7)
+        self.assertEqual(_int("abc", 7), 7)
 
     def test_iterator_input_and_sweep_match_dataframe(self):
         rows = []

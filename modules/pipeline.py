@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 import pandas as pd
+from sklearn.ensemble import IsolationForest
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import FunctionTransformer, StandardScaler
 
@@ -157,18 +158,26 @@ def detect_anomalies(
     try:
         X_scaled = scaler.transform(X)
         X_filtered = selector.transform(X_scaled) if selector is not None else X_scaled
-        predictions = np.asarray(model.predict(X_filtered))
+        if isinstance(model, IsolationForest):
+            # predict у IsolationForest — это decision_function < 0: один проход
+            # по деревьям вместо двух, результат тот же
+            scores = np.asarray(model.decision_function(X_filtered), dtype=float)
+            predictions = np.where(scores < 0, -1, 1)
+        else:
+            predictions = np.asarray(model.predict(X_filtered))
+            scores = None
     except Exception as exc:  # sklearn бросает разные типы исключений
         raise FeatureValidationError(
             "Модель не смогла обработать данные "
             f"(проверьте типы и диапазоны признаков): {exc}"
         ) from exc
 
-    try:
-        scores = np.asarray(model.decision_function(X_filtered), dtype=float)
-    except Exception:
-        # decision_function есть не у всех моделей — не критично для детекции
-        scores = np.zeros(len(X), dtype=float)
+    if scores is None:
+        try:
+            scores = np.asarray(model.decision_function(X_filtered), dtype=float)
+        except Exception:
+            # decision_function есть не у всех моделей — не критично для детекции
+            scores = np.zeros(len(X), dtype=float)
 
     percentiles = None
     if calibration is not None:

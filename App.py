@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import functools
 import hmac
 import logging
+import mimetypes
 import os
 import shutil
 import sys
@@ -244,7 +246,8 @@ def _init_state() -> None:
         "df": None,
         "file_id": None,
         "brute": None,
-        "flows_parquet": None,
+        "pcap_flows": None,
+        "derived": None,
         "model_dir": None,
         "llm_provider": None,
         "llm_keys": {},
@@ -304,6 +307,9 @@ def _render_identity() -> None:
             "file_id",
             "explanations",
             "brute",
+            "pcap_flows",
+            "derived",
+            "model_warnings_logged",
             "llm_keys",
         ):
             st.session_state.pop(key, None)
@@ -388,16 +394,26 @@ def _load_uploads(files) -> tuple[pd.DataFrame, pd.DataFrame | None]:
     return df, pd.concat(pcap_frames, ignore_index=True)
 
 
-def _flow_title(result: DetectionResult, index: int, brute, brute_probs) -> str:
-    row = result.df.iloc[index]
-    parts = [f"#{index}"]
-    if all(column in row.index for column in ("Src IP", "Dst IP", "Dst Port")):
-        parts.append(f"{row['Src IP']} → {row['Dst IP']}:{row['Dst Port']}")
-    if brute is not None and brute_probs is not None and brute_probs[index] >= brute.threshold:
-        parts.append(f"{brute.display_name} p={brute_probs[index]:.2f}")
-    if result.mask[index]:
-        parts.append(f"IF {result.scores[index]:.3f}")
-    return " · ".join(parts)
+def _flow_titles(result: DetectionResult, indices: list[int], brute, brute_probs) -> dict[int, str]:
+    """Подписи потоков для списка тревог: колонки берутся целиком, а не строкой
+    df.iloc на каждый поток (на 500 тревогах — в десятки раз быстрее)."""
+    df = result.df
+    peers = {}
+    if all(column in df.columns for column in ("Src IP", "Dst IP", "Dst Port")):
+        rows = np.asarray(indices, dtype=int)
+        columns = (df[name].to_numpy()[rows] for name in ("Src IP", "Dst IP", "Dst Port"))
+        peers = {index: f"{src} → {dst}:{port}" for index, src, dst, port in zip(indices, *columns)}
+    titles = {}
+    for index in indices:
+        parts = [f"#{index}"]
+        if index in peers:
+            parts.append(peers[index])
+        if brute is not None and brute_probs is not None and brute_probs[index] >= brute.threshold:
+            parts.append(f"{brute.display_name} p={brute_probs[index]:.2f}")
+        if result.mask[index]:
+            parts.append(f"IF {result.scores[index]:.3f}")
+        titles[index] = " · ".join(parts)
+    return titles
 
 
 def _ask_llm(
@@ -437,9 +453,13 @@ def _render_flow_review(
     brute_mask,
     incidents,
     provider: str | None,
+    cache: dict,
 ) -> None:
     """Любой поток: факты моделей, вопрос к ИИ, уточнения в чате, отчёт в Markdown."""
-    candidates = flagged_candidates(result, brute_probs, brute_mask)
+    candidates = _memo(cache, "candidates",
+                       lambda: flagged_candidates(result, brute_probs, brute_mask))
+    titles = _memo(cache, "titles",
+                   lambda: _flow_titles(result, candidates, brute, brute_probs))
     target = st.session_state.pop("goto_flow", None)
     if target is None and "flow_mode" not in st.session_state:
         # Streamlit забывает виджеты скрытой вкладки — возвращаем прежний поток
@@ -456,7 +476,7 @@ def _render_flow_review(
         index = st.selectbox(
             f"Тревоги ({len(candidates):,}, сначала самые уверенные)",
             candidates,
-            format_func=lambda i: _flow_title(result, i, brute, brute_probs),
+            format_func=titles.__getitem__,
             key="flow_pick",
         )
     else:
@@ -472,10 +492,10 @@ def _render_flow_review(
     report_kwargs = dict(
         brute=brute, brute_probs=brute_probs, brute_mask=brute_mask, incidents=incidents
     )
-    report = build_flow_report(result, index, means, stds, mask_ips=False, **report_kwargs)
-    in_incident = incidents is not None and bool(len(incidents)) and bool(
-        incidents["rows"].apply(lambda rows: index in rows).any()
-    )
+    # Отчёт проходит по адресам всего файла — один раз на поток, а не на каждый клик
+    report = _memo(cache, ("report", index), lambda: build_flow_report(
+        result, index, means, stds, mask_ips=False, **report_kwargs))
+    in_incident = index in _memo(cache, "incident_rows", lambda: _incident_rows(incidents))
     level, text = model_verdict(
         bool(result.mask[index]),
         bool(brute_mask[index]) if brute_mask is not None else None,
@@ -492,10 +512,11 @@ def _render_flow_review(
     facts, chart = st.columns([3, 2])
     with facts.expander("Факты о потоке", expanded=True):
         st.markdown(report)
-    deviations = feature_deviations(result.X.iloc[index], means, stds, TOP_FEATURES_CHART)
+    deviations = _memo(cache, ("deviations", index), lambda: feature_deviations(
+        result.X.iloc[index], means, stds, TOP_FEATURES_CHART))
     if not deviations.empty:
         chart.caption("Чем поток отличается от нормы (наведите на столбец)")
-        chart.altair_chart(deviation_chart(deviations, _theme()), width="stretch")
+        _chart(chart, "deviation", deviations)
 
     for message in chat:
         with st.chat_message(message["role"]):
@@ -524,7 +545,8 @@ def _render_flow_review(
         st.caption("В LLM уходят признаки и решения моделей; адреса замаскированы.")
         question = question.strip() or ("" if chat else DEFAULT_QUESTION)
         if asked and question:
-            masked = build_flow_report(result, index, means, stds, mask_ips=True, **report_kwargs)
+            masked = _memo(cache, ("masked_report", index), lambda: build_flow_report(
+                result, index, means, stds, mask_ips=True, **report_kwargs))
             api_key = st.session_state.llm_keys.get(provider)
             if _ask_llm(user, role, provider, api_key, chat, question, masked, index):
                 st.rerun()  # история над формой, как при следующих вопросах
@@ -548,6 +570,13 @@ def _render_flow_review(
     )
 
 
+def _incident_rows(incidents) -> set[int]:
+    """Все потоки, вошедшие в инциденты."""
+    if incidents is None or not len(incidents):
+        return set()
+    return {int(row) for rows in incidents["rows"] for row in rows}
+
+
 def _compute_brute(result: DetectionResult, brute):
     if brute is None:
         return None
@@ -560,18 +589,58 @@ def _compute_brute(result: DetectionResult, brute):
 
 
 def _compute_incidents(result: DetectionResult, brute_probs, brute_mask):
-    """Инциденты по внешнему адресу за час; None — если адресов в файле нет."""
+    """Инциденты по внешнему адресу за час (None — если адресов в файле нет)
+    и предупреждения: их показывают при каждой перерисовке, а считают один раз."""
+    warnings = []
     try:
         trusted = parse_trusted(os.environ.get("TRUSTED_IPS", ""))
     except ValueError as exc:
-        st.warning(f"TRUSTED_IPS не разобран ({exc}) — доверенных адресов нет.")
+        warnings.append(f"TRUSTED_IPS не разобран ({exc}) — доверенных адресов нет.")
         trusted = []
     try:
-        return aggregate_alerts(result.df, brute_mask, brute_probs, trusted=trusted)
+        return aggregate_alerts(result.df, brute_mask, brute_probs, trusted=trusted), warnings
     except Exception as exc:  # битые адреса/время в загруженном файле
         logger.exception("Инциденты не собраны")
-        st.warning(f"Инциденты не собраны: {exc}")
-        return None
+        warnings.append(f"Инциденты не собраны: {exc}")
+        return None, warnings
+
+
+def _derived(result: DetectionResult, brute, brute_payload) -> dict:
+    """Кэш производных одного анализа: инциденты, графики, таблицы, заголовки.
+    Streamlit перезапускает скрипт на каждый клик — без кэша всё это
+    пересчитывалось бы заново. Новый анализ или другая модель — новый кэш."""
+    key = (id(result), id(brute), id(brute_payload))
+    cache = st.session_state.get("derived")
+    if cache is None or cache.get("key") != key:
+        cache = {"key": key}
+        st.session_state.derived = cache
+    return cache
+
+
+def _memo(cache: dict, name, compute):
+    if name not in cache:
+        cache[name] = compute()
+    return cache[name]
+
+
+# Altair -> Vega-Lite так же, как внутри st.altair_chart (функция Streamlit не
+# публичная: если её изменят, это поймает тест test_chart_specs)
+from streamlit.elements.vega_charts import _convert_altair_to_vega_lite_spec  # noqa: E402
+
+_CHARTS = {"timeline": timeline_chart, "top": top_chart, "deviation": deviation_chart,
+          "daily": daily_chart, "hourly": hourly_chart}
+
+
+@st.cache_data(show_spinner=False, max_entries=128)
+def _chart_spec(kind: str, data: pd.DataFrame, args: tuple, theme: str | None) -> dict:
+    return _convert_altair_to_vega_lite_spec(_CHARTS[kind](data, *args, theme))
+
+
+def _chart(container, kind: str, data: pd.DataFrame, *args) -> None:
+    """График из modules.charts. Спецификация Vega-Lite кэшируется по данным и теме:
+    сборка графика Altair и проверка его схемы — 0,05–0,1 с на график при каждой
+    перерисовке, а данные графиков между кликами почти никогда не меняются."""
+    container.vega_lite_chart(_chart_spec(kind, data, args, _theme()), width="stretch")
 
 
 VERDICT_WORDS = {
@@ -601,27 +670,27 @@ def _theme() -> str | None:
         return None
 
 
-def _goto_flow(index: int) -> None:
-    """Открыть поток во вкладке «Разбор потока» (виджеты обновятся при перезапуске)."""
-    st.session_state.goto_flow = int(index)
-    st.session_state.goto_view = "Разбор потока"
-    st.rerun()
+def _open_selected_flow(table_key: str, numbers: list[int]) -> None:
+    """Клик по строке таблицы -> разбор потока. Колбэк выполняется до перерисовки,
+    поэтому переход стоит одной перерисовки, а не двух (как с st.rerun)."""
+    rows = st.session_state[table_key].selection.rows
+    if rows:
+        st.session_state.goto_flow = int(numbers[rows[0]])
+        st.session_state.goto_view = "Разбор потока"
 
 
-def _jump_on_select(event, table: pd.DataFrame, key: str, column: str = "#") -> None:
-    """Клик по строке таблицы -> разбор потока. Повторно та же строка не срабатывает:
-    при возврате на вкладку Streamlit восстанавливает прежний выбор."""
-    rows = event.selection.rows if event is not None else []
-    if not rows:
-        st.session_state.pop(key, None)
-        return
-    index = int(table.iloc[rows[0]][column])
-    if st.session_state.get(key) != index:
-        st.session_state[key] = index
-        _goto_flow(index)
+def _flow_selector(table: pd.DataFrame, key: str, column: str = "#") -> dict:
+    """Параметры st.dataframe для перехода к потоку по клику на строку."""
+    numbers = table[column].astype(int).tolist()
+    return dict(
+        on_select=functools.partial(_open_selected_flow, key, numbers),
+        selection_mode="single-row", key=key,
+    )
 
 
-def _render_overview(result: DetectionResult, brute, brute_probs, brute_mask, incidents) -> None:
+def _render_overview(
+    result: DetectionResult, brute, brute_probs, brute_mask, incidents, cache: dict
+) -> None:
     cols = st.columns(5)
     cols[0].metric("Потоков", f"{result.total:,}", border=True)
     cols[1].metric("Аномалий IF", f"{result.n_anomalies:,}",
@@ -646,16 +715,16 @@ def _render_overview(result: DetectionResult, brute, brute_probs, brute_mask, in
     masks = {"IsolationForest": result.mask}
     if brute_mask is not None:
         masks[brute.display_name] = brute_mask
-    timeline = alert_timeline(result.df, masks)
+    timeline = _memo(cache, "timeline", lambda: alert_timeline(result.df, masks))
     st.markdown("##### Тревоги по времени")
     if timeline is None:
         st.caption("В файле нет времени потоков (Timestamp) — график недоступен.")
     else:
-        st.altair_chart(timeline_chart(timeline, list(masks), _theme()), width="stretch")
+        _chart(st, "timeline", timeline, list(masks))
 
     flagged = brute_mask if brute_mask is not None else result.mask
     source = brute.display_name if brute_mask is not None else "IsolationForest"
-    peers = top_peers(result.df, flagged)
+    peers = _memo(cache, "peers", lambda: top_peers(result.df, flagged))
     if peers is None:
         st.caption("В файле нет адресов и портов — топ-списки недоступны.")
         return
@@ -665,12 +734,24 @@ def _render_overview(result: DetectionResult, brute, brute_probs, brute_mask, in
     if peers.empty:
         left.caption("Тревог нет.")
         return
-    left.altair_chart(top_chart(peers, "Адрес", _theme()), width="stretch")
-    right.altair_chart(top_chart(top_ports(result.df, flagged), "Порт", _theme()),
-                       width="stretch")
+    _chart(left, "top", peers, "Адрес")
+    ports = _memo(cache, "ports", lambda: top_ports(result.df, flagged))
+    _chart(right, "top", ports, "Порт")
 
 
-def _render_incidents(brute, brute_probs, brute_mask, incidents) -> None:
+def _incident_table(incidents: pd.DataFrame, brute_probs) -> pd.DataFrame:
+    """Таблица инцидентов: сначала больше потоков; «#» — самый уверенный поток инцидента."""
+    ordered = incidents.sort_values(["flows", "max_proba"], ascending=False).reset_index(drop=True)
+    ordered["top_row"] = [max(rows, key=lambda r: brute_probs[r]) for rows in ordered["rows"]]
+    return ordered.drop(columns=["rows"]).rename(columns={
+        "window_start": "Час", "peer": "Адрес", "flows": "Потоков",
+        "services": "Порты сервера", "max_proba": "Макс. вероятность",
+        "first_seen": "Первый", "last_seen": "Последний", "reason": "Почему инцидент",
+        "top_row": "#",
+    })
+
+
+def _render_incidents(brute, brute_probs, brute_mask, incidents, cache: dict) -> None:
     """Подозрительные потоки, сведённые в инциденты по внешнему адресу за час."""
     if brute_mask is None:
         st.info("Инциденты собираются из срабатываний классификатора атак, а его у модели нет.")
@@ -687,19 +768,10 @@ def _render_incidents(brute, brute_probs, brute_mask, incidents) -> None:
             "скорее всего, ложные."
         )
         return
-    # Порядок как в таблице: сначала больше потоков; для перехода — самый уверенный поток
-    ordered = incidents.sort_values(["flows", "max_proba"], ascending=False).reset_index(drop=True)
-    ordered["top_row"] = [max(rows, key=lambda r: brute_probs[r]) for rows in ordered["rows"]]
-    view = ordered.drop(columns=["rows"]).rename(columns={
-        "window_start": "Час", "peer": "Адрес", "flows": "Потоков",
-        "services": "Порты сервера", "max_proba": "Макс. вероятность",
-        "first_seen": "Первый", "last_seen": "Последний", "reason": "Почему инцидент",
-        "top_row": "#",
-    })
+    view = _memo(cache, "incident_table", lambda: _incident_table(incidents, brute_probs))
     st.caption("Нажмите на строку — откроется разбор самого уверенного потока инцидента.")
-    event = st.dataframe(
-        view, hide_index=True, on_select="rerun", selection_mode="single-row",
-        key="incidents_table",
+    st.dataframe(
+        view, hide_index=True, **_flow_selector(view, "incidents_table"),
         column_config={
             "Час": st.column_config.DatetimeColumn(format="DD.MM HH:mm"),
             "Первый": st.column_config.DatetimeColumn(format="HH:mm:ss"),
@@ -714,10 +786,19 @@ def _render_incidents(brute, brute_probs, brute_mask, incidents) -> None:
         "подозрительных потоков с одного адреса за час; единичные срабатывания "
         "на других портах — почти всегда ложные."
     )
-    _jump_on_select(event, view, "incidents_jump")
 
 
-def _render_flows(result: DetectionResult, brute, brute_probs, brute_mask) -> None:
+def _flow_rows(result: DetectionResult, choice: str, brute_probs, brute_mask) -> np.ndarray:
+    """Строки для таблицы потоков: сначала самые подозрительные."""
+    if choice.startswith("Тревоги"):
+        rows = np.flatnonzero(brute_mask)
+        return rows[np.argsort(-brute_probs[rows], kind="stable")]
+    if choice.startswith("Аномалии"):
+        return result.indices[np.argsort(result.scores[result.indices], kind="stable")]
+    return np.arange(result.total)
+
+
+def _render_flows(result: DetectionResult, brute, brute_probs, brute_mask, cache: dict) -> None:
     filters = []
     if brute_mask is not None:
         filters.append(f"Тревоги: {brute.display_name}")
@@ -727,25 +808,17 @@ def _render_flows(result: DetectionResult, brute, brute_probs, brute_mask) -> No
     choice = st.radio("Показать", filters, horizontal=True, key="flows_filter",
                       label_visibility="collapsed")
     st.session_state.flows_choice = choice
-    if choice.startswith("Тревоги"):
-        rows = np.flatnonzero(brute_mask)
-        rows = rows[np.argsort(-brute_probs[rows], kind="stable")]
-    elif choice.startswith("Аномалии"):
-        rows = result.indices[np.argsort(result.scores[result.indices], kind="stable")]
-    else:
-        rows = np.arange(result.total)
-    if not len(rows):
+    total, table = _memo(cache, f"flows_{choice}", lambda: _flows_table(
+        result, _flow_rows(result, choice, brute_probs, brute_mask), brute_probs))
+    if table is None:
         st.success("Таких потоков нет.")
         return
-    shown = rows[:TABLE_LIMIT]
-    table = flow_table(result, shown, brute_probs)
     st.caption(
-        f"Показано {len(shown):,} из {len(rows):,} (сначала самые подозрительные). "
+        f"Показано {len(table):,} из {total:,} (сначала самые подозрительные). "
         "Нажмите на строку — откроется разбор потока."
     )
-    event = st.dataframe(
-        table, hide_index=True, on_select="rerun", selection_mode="single-row",
-        key=f"flows_table_{filters.index(choice)}",
+    st.dataframe(
+        table, hide_index=True, **_flow_selector(table, f"flows_table_{filters.index(choice)}"),
         column_config={
             "#": st.column_config.NumberColumn("Строка", format="%d"),
             "Вероятность атаки": st.column_config.ProgressColumn(
@@ -756,7 +829,13 @@ def _render_flows(result: DetectionResult, brute, brute_probs, brute_mask) -> No
                 help="Меньше — необычнее; аномалия — не выше порога IsolationForest"),
         },
     )
-    _jump_on_select(event, table, f"flows_jump_{filters.index(choice)}")
+
+
+def _flows_table(result: DetectionResult, rows: np.ndarray, brute_probs):
+    """Сколько всего строк и таблица первых TABLE_LIMIT (None — строк нет)."""
+    if not len(rows):
+        return 0, None
+    return len(rows), flow_table(result, rows[:TABLE_LIMIT], brute_probs)
 
 
 def _render_analysis(
@@ -771,28 +850,34 @@ def _render_analysis(
     brute_mask = None
     if brute is not None and brute_payload is not None:
         brute_probs, brute_mask = brute_payload
-    incidents = (
-        _compute_incidents(result, brute_probs, brute_mask) if brute_mask is not None else None
-    )
+    cache = _derived(result, brute, brute_payload)
+    incidents = None
+    if brute_mask is not None:
+        incidents, warnings = _memo(
+            cache, "incidents", lambda: _compute_incidents(result, brute_probs, brute_mask))
+        for message in warnings:
+            st.warning(message)
 
     pending = st.session_state.pop("goto_view", None)
     if pending is not None:
         st.session_state.view = pending  # до создания переключателя вкладок
     elif st.session_state.get("view") not in VIEWS:
-        st.session_state.view = VIEWS[0]
+        # Вкладка «Мониторинг» или «Серверы» была открыта — переключатель забыт
+        st.session_state.view = st.session_state.get("view_choice", VIEWS[0])
     view = st.segmented_control(
         "Раздел", VIEWS, key="view", required=True, label_visibility="collapsed",
         format_func=lambda name: f"{VIEW_ICONS[name]} {name}",
     )
+    st.session_state.view_choice = view
     if view == "Обзор":
-        _render_overview(result, brute, brute_probs, brute_mask, incidents)
+        _render_overview(result, brute, brute_probs, brute_mask, incidents, cache)
     elif view == "Инциденты":
-        _render_incidents(brute, brute_probs, brute_mask, incidents)
+        _render_incidents(brute, brute_probs, brute_mask, incidents, cache)
     elif view == "Потоки":
-        _render_flows(result, brute, brute_probs, brute_mask)
+        _render_flows(result, brute, brute_probs, brute_mask, cache)
     else:
         _render_flow_review(
-            result, means, stds, brute, brute_probs, brute_mask, incidents, provider
+            result, means, stds, brute, brute_probs, brute_mask, incidents, provider, cache
         )
 
 
@@ -800,6 +885,7 @@ def _reset_analysis() -> None:
     st.session_state.analysis = None
     st.session_state.explanations = {}
     st.session_state.brute = None
+    st.session_state.derived = None
 
 
 def _render_llm_keys(user, role, registry) -> dict:
@@ -847,7 +933,7 @@ def _select_llm_provider(user, role) -> str | None:
         "LLM для разбора",
         options,
         index=options.index(current) if current in options else 0,
-        format_func=lambda i: provider_label(i) + ("" if i in ready else " — нужен ключ"),
+        format_func=lambda i: registry[i].label + ("" if i in ready else " — нужен ключ"),
     )
     if provider not in ready:
         st.caption(
@@ -936,9 +1022,12 @@ def _render_model_status(entry: ModelEntry | None, assets: Assets, user, role) -
     st.caption(":green[:material/check_circle:] Модель и статистики загружены")
     if entry is not None:
         _render_model_card(entry)
+    logged = st.session_state.setdefault("model_warnings_logged", set())
     for message in assets.errors:
         st.warning(message, icon=":material/warning:")
-        log_event(user, role, "model_warning", message=message)
+        if message not in logged:  # в журнал — один раз, а не на каждый клик
+            logged.add(message)
+            log_event(user, role, "model_warning", message=message)
     st.caption(f"Признаков: {len(assets.feature_cols)}")
     calibration = assets.calibration
     if calibration is not None:
@@ -977,7 +1066,7 @@ def _handle_upload(user, role) -> tuple[pd.DataFrame, str] | None:
     if st.session_state.file_id != file_id:
         st.session_state.file_id = None
         st.session_state.df = None
-        st.session_state.flows_parquet = None
+        st.session_state.pcap_flows = None
         _reset_analysis()
         try:
             df, pcap_flows = _load_uploads(uploaded)
@@ -992,8 +1081,9 @@ def _handle_upload(user, role) -> tuple[pd.DataFrame, str] | None:
 
         st.session_state.file_id = file_id
         st.session_state.df = df
-        if pcap_flows is not None:
-            st.session_state.flows_parquet = pcap_flows.to_parquet(index=False)
+        # Таблица, а не байты Parquet: Parquet собирается только по кнопке, а если
+        # загружены одни pcap, это та же таблица, что и df — без второй копии
+        st.session_state.pcap_flows = pcap_flows
         log_event(
             user,
             role,
@@ -1032,6 +1122,7 @@ def _run_analysis(df: pd.DataFrame, assets: Assets, user, role) -> None:
         return
     st.session_state.analysis = result
     st.session_state.explanations = {}
+    st.session_state.derived = None
     brute_payload = _compute_brute(result, assets.brute)
     st.session_state.brute = brute_payload
     log_event(
@@ -1060,6 +1151,10 @@ def _render_header(entry: ModelEntry | None) -> None:
 
 
 def main() -> None:
+    if not mimetypes.inited:
+        # Первая кнопка «Скачать» читает типы файлов из реестра Windows (~0,5 с) —
+        # пусть это случится при запуске сервера, а не при клике пользователя
+        mimetypes.init()
     _init_state()
     _login_screen()
 
@@ -1097,19 +1192,75 @@ def main() -> None:
     _render_header(entry)
     # Вкладки по возможностям: мониторинг — если monitor.py уже запускался,
     # серверы — админу и только там, где есть ssh (не в Docker)
+    # render(open): закрытые вкладки не считаются. Загрузчик файлов рисуется
+    # всегда — иначе Streamlit забудет загруженные файлы, пока открыта другая вкладка
     sections = {":material/upload_file: Анализ файла":
-                lambda: _render_file_analysis(assets, provider, user, role)}
-    monitoring = load_incidents()
+                lambda open_: _render_file_analysis(assets, provider, user, role, open_)}
+    monitoring = _load_monitoring()
     if monitoring is not None:
-        sections[":material/monitor_heart: Мониторинг серверов"] = lambda: _render_monitoring(*monitoring, user, role)
+        sections[":material/monitor_heart: Мониторинг серверов"] = (
+            lambda open_: open_ and _render_monitoring(*monitoring, user, role))
     if can_manage_servers(role) and shutil.which("ssh"):
-        sections[":material/dns: Серверы"] = lambda: _render_servers(user, role)
+        sections[":material/dns: Серверы"] = lambda open_: open_ and _render_servers(user, role)
     if len(sections) == 1:
-        next(iter(sections.values()))()
+        next(iter(sections.values()))(True)
         return
-    for tab, render in zip(st.tabs(list(sections)), sections.values()):
+    tabs = st.tabs(list(sections), key="main_tab", on_change="rerun")
+    for tab, render in zip(tabs, sections.values()):
         with tab:
-            render()
+            render(bool(tab.open))
+
+
+def _mtime(path: str) -> float | None:
+    try:
+        return os.path.getmtime(path)
+    except OSError:
+        return None
+
+
+# История мониторинга — из кэша, пока monitor.py не переписал файлы: mtime передаётся
+# обычным параметром (без «_», такие st.cache_data пропускает) и входит в ключ кэша
+@st.cache_data(show_spinner=False, max_entries=4)
+def _cached_incidents(directory: str, stamp: float):
+    return load_incidents(directory)
+
+
+@st.cache_data(show_spinner=False, max_entries=32)
+def _cached_traffic(directory: str, name: str, stamps: tuple) -> pd.DataFrame:
+    return mon.server_traffic(directory, name)
+
+
+@st.cache_data(show_spinner=False, max_entries=32)
+def _cached_ports(directory: str, name: str, local_ip: str | None, stamp) -> pd.DataFrame:
+    return mon.attacked_ports(directory, name, local_ip)
+
+
+@st.cache_data(show_spinner=False, max_entries=32)
+def _cached_attackers(incidents: pd.DataFrame) -> pd.DataFrame:
+    return mon.top_attackers(incidents)
+
+
+@st.cache_data(show_spinner=False, ttl=60)
+def _last_download(local: str):
+    """Поиск свежего захвата обходит всю папку сервера — не чаще раза в минуту."""
+    return mon.last_download(local)
+
+
+def _load_monitoring():
+    directory = mon.state_dir()
+    stamp = _mtime(os.path.join(directory, mon.INCIDENTS_FILE))
+    return None if stamp is None else _cached_incidents(directory, stamp)
+
+
+def _server_traffic(directory: str, name: str) -> pd.DataFrame:
+    stamps = tuple(_mtime(os.path.join(directory, name, file))
+                   for file in (mon.HOURLY_FILE, mon.FLAGGED_FILE))
+    return _cached_traffic(directory, name, stamps)
+
+
+def _attacked_ports(directory: str, name: str, local_ip: str | None) -> pd.DataFrame:
+    stamp = _mtime(os.path.join(directory, name, mon.FLAGGED_FILE))
+    return _cached_ports(directory, name, local_ip, stamp)
 
 
 def _render_monitoring(incidents: pd.DataFrame, updated, user=None, role=None) -> None:
@@ -1128,10 +1279,14 @@ def _render_monitoring(incidents: pd.DataFrame, updated, user=None, role=None) -
     names = sorted(set(configured) | (set(incidents["server"]) if len(incidents) else set()))
     server = "Все"
     if len(names) > 1:
+        if "monitor_server" not in st.session_state:  # вкладку закрывали — выбор забыт
+            remembered = st.session_state.get("monitor_server_choice")
+            st.session_state.monitor_server = remembered if remembered in names else "Все"
         server = st.segmented_control(
-            "Сервер", ["Все", *names], default="Все", required=True,
+            "Сервер", ["Все", *names], required=True,
             key="monitor_server", label_visibility="collapsed",
         )
+        st.session_state.monitor_server_choice = server
     elif names:
         server = names[0]
     if server != "Все":
@@ -1158,7 +1313,7 @@ def _render_monitoring(incidents: pd.DataFrame, updated, user=None, role=None) -
         return
 
     st.markdown("##### Инциденты по дням")
-    st.altair_chart(daily_chart(daily_counts(incidents), _theme()), width="stretch")
+    _chart(st, "daily", daily_counts(incidents))
     view = incidents.sort_values("window_start", ascending=False).rename(columns={
         "server": "Сервер", "window_start": "Час", "peer": "Адрес", "flows": "Потоков",
         "services": "Порты сервера", "max_proba": "Макс. вероятность", "first_seen": "Первый",
@@ -1190,10 +1345,10 @@ def _render_servers_comparison(names, configured, incidents) -> None:
     directory = mon.state_dir()
     rows = []
     for name in names:
-        day = mon.traffic_summary(mon.server_traffic(directory, name), _day_ago())
+        day = mon.traffic_summary(_server_traffic(directory, name), _day_ago())
         own = incidents[incidents["server"] == name]
         entry = configured.get(name)
-        downloaded = mon.last_download(entry.local) if entry and entry.local else None
+        downloaded = _last_download(entry.local) if entry and entry.local else None
         rows.append({
             "Сервер": name,
             "Потоков за сутки": day["flows"],
@@ -1219,9 +1374,9 @@ def _render_servers_comparison(names, configured, incidents) -> None:
 def _render_server_stats(name, entry, incidents, user, role) -> None:
     """Один сервер: трафик и тревоги по часам, атакующие, порты, состояние сбора."""
     directory = mon.state_dir()
-    traffic = mon.server_traffic(directory, name)
+    traffic = _server_traffic(directory, name)
     day = mon.traffic_summary(traffic, _day_ago())
-    downloaded = mon.last_download(entry.local) if entry and entry.local else None
+    downloaded = _last_download(entry.local) if entry and entry.local else None
 
     st.markdown(f"##### {name}: трафик за сутки")
     cols = st.columns(3, gap="small")
@@ -1233,16 +1388,16 @@ def _render_server_stats(name, entry, incidents, user, role) -> None:
                    help="Когда pull_captures.ps1 последний раз скачал файл захвата")
     if len(traffic):
         left, right = st.columns(2)
-        left.altair_chart(hourly_chart(traffic, "Потоков", "blue", _theme()), width="stretch")
-        right.altair_chart(hourly_chart(traffic, "Тревог", "orange", _theme()), width="stretch")
+        _chart(left, "hourly", traffic, "Потоков", "blue")
+        _chart(right, "hourly", traffic, "Тревог", "orange")
         if not traffic["Потоков"].any():
             st.caption("Все потоки по часам monitor.py считает с этой версии: "
                        "график заполнится после следующей проверки.")
     else:
         st.caption("monitor.py ещё не проверял захваты этого сервера.")
 
-    attackers = mon.top_attackers(incidents)
-    ports = mon.attacked_ports(directory, name, mon.load_state(directory)["local_ip"].get(name))
+    attackers = _cached_attackers(incidents)
+    ports = _attacked_ports(directory, name, mon.load_state(directory)["local_ip"].get(name))
     left, right = st.columns([3, 2])
     with left:
         st.markdown("##### Атакующие адреса")
@@ -1254,7 +1409,7 @@ def _render_server_stats(name, entry, incidents, user, role) -> None:
     with right:
         st.markdown("##### Порты под ударом")
         if len(ports):
-            st.altair_chart(top_chart(ports, "Порт", _theme()), width="stretch")
+            _chart(st, "top", ports, "Порт")
         else:
             st.caption("Тревог нет.")
 
@@ -1560,19 +1715,21 @@ def _render_server_start(pending: dict, user, role) -> None:
             st.code(st.session_state.new_server_plan, language=None)
 
 
-def _render_file_analysis(assets: Assets, provider, user, role) -> None:
+def _render_file_analysis(assets: Assets, provider, user, role, open_: bool = True) -> None:
     upload = _handle_upload(user, role)
-    if upload is None:
+    if upload is None or not open_:
         return
     df, names = upload
 
     st.caption(f"Файлы: `{names}` — {len(df):,} записей, {len(df.columns)} колонок")
-    if st.session_state.flows_parquet is not None:
+    flows = st.session_state.pcap_flows
+    if flows is not None:
         st.download_button(
             "Скачать потоки (Parquet)",
-            st.session_state.flows_parquet,
+            lambda: flows.to_parquet(index=False),  # собирается только по нажатию
             file_name="flows.parquet",
             mime="application/octet-stream",
+            on_click="ignore",
             help="Потоки из pcap: в следующий раз можно загрузить их без конвертации",
         )
 

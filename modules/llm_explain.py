@@ -77,21 +77,39 @@ def _setting(name: str) -> str:
     return value or _secret(name)
 
 
-def _secret(name: str) -> str:
+# Секреты перечитываются не чаще раза в SECRETS_TTL секунд: за одну перерисовку
+# приложения настроек LLM читается около сотни, а без secrets.toml Streamlit
+# ищет файл заново при каждом обращении (~0,1 с на каждый клик)
+SECRETS_TTL = 2.0
+_secrets_cache: tuple[float, dict] = (float("-inf"), {})
+
+
+def _secrets() -> dict:
+    """st.secrets обычным словарём; пустой — вне Streamlit или без secrets.toml."""
+    global _secrets_cache
+    stamp, cached = _secrets_cache
+    now = time.monotonic()
+    if now - stamp < SECRETS_TTL:
+        return cached
     try:
         import streamlit as st
 
-        secrets = st.secrets
-        for key in (name, name.lower()):
-            if key in secrets:
-                return str(secrets[key]).strip()
-        section, _, key = name.lower().partition("_")
-        if section in secrets and key in secrets[section]:
-            return str(secrets[section][key]).strip()
+        cached = st.secrets.to_dict()
     except Exception:
         # Streamlit не запущен (CLI) или secrets.toml отсутствует
-        pass
+        cached = {}
+    _secrets_cache = (now, cached)
+    return cached
 
+
+def _secret(name: str) -> str:
+    secrets = _secrets()
+    for key in (name, name.lower()):
+        if key in secrets:
+            return str(secrets[key]).strip()
+    section, _, key = name.lower().partition("_")
+    if isinstance(secrets.get(section), dict) and key in secrets[section]:
+        return str(secrets[section][key]).strip()
     return ""
 
 

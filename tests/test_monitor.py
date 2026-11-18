@@ -325,6 +325,13 @@ class MonitorEdgeCaseTests(MonitorCase):
         edge = merge_hourly(updated, {"c": hours(("2026-10-18 10:00", 1))}, retain_days=14)
         self.assertIn("c", set(edge["file"]))
 
+    def test_server_without_history(self):
+        # Сервер уже в списке, но monitor.py его ещё не проверял: вкладка не должна падать
+        traffic = server_traffic(self.state, "serverNew")
+        self.assertEqual(len(traffic), 0)
+        summary = traffic_summary(traffic, pd.Timestamp("2026-11-01"))
+        self.assertEqual((summary["flows"], summary["alerts"], summary["share"]), (0, 0, None))
+
     def test_traffic_summary_includes_start_hour(self):
         traffic = pd.DataFrame({"Час": pd.to_datetime(["2026-11-01 09:00", "2026-11-01 10:00"]),
                                 "Потоков": [5, 3], "Тревог": [1, 1]})

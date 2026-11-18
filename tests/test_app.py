@@ -8,6 +8,7 @@
 import json
 import os
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import numpy as np
@@ -121,8 +122,30 @@ class AppSmokeTests(unittest.TestCase):
             None, directory=self.env["MONITOR_DIR"], log=lambda message: None)
         app = self.run_app()
         labels = [tab.label for tab in app.tabs]
-        self.assertTrue(any("Мониторинг" in label for label in labels), labels)
+        monitoring = next((label for label in labels if "Мониторинг" in label), None)
+        self.assertIsNotNone(monitoring, labels)
+        # Закрытая вкладка не считается
+        self.assertNotIn("За сутки", [metric.label for metric in app.metric])
+        app.session_state["main_tab"] = monitoring
+        self.rerun(app)
         self.assertIn("За сутки", [metric.label for metric in app.metric])
+
+    def test_analysis_survives_switching_tabs(self):
+        app = self.run_app(ssh=True)
+        servers = next(tab.label for tab in app.tabs if "Серверы" in tab.label)
+        app.file_uploader[0].set_value(("flows.csv", synthetic_flows(), "text/csv"))
+        self.rerun(app, ssh=True)
+        next(b for b in app.button if b.label == "Анализировать").click()
+        self.rerun(app, ssh=True)
+        app.segmented_control(key="view").set_value("Потоки")
+        self.rerun(app, ssh=True)
+        app.session_state["main_tab"] = servers
+        self.rerun(app, ssh=True)
+        self.assertEqual(len(app.segmented_control), 0)  # анализ на закрытой вкладке не рисуется
+        app.session_state["main_tab"] = app.tabs[0].label
+        self.rerun(app, ssh=True)
+        self.assertEqual(app.segmented_control(key="view").value, "Потоки")
+        self.assertEqual(len(app.radio(key="flows_filter").options), 3)  # раздел «Потоки» снова на месте
 
     def test_upload_analyze_and_switch_views(self):
         app = self.run_app()
@@ -140,6 +163,12 @@ class AppSmokeTests(unittest.TestCase):
                 app.segmented_control(key="view").set_value(view)
                 self.rerun(app)
                 self.assertEqual(app.segmented_control(key="view").value, view)
+        # Таблица с переходом по клику (на этих данных тревог нет — берём все потоки)
+        app.segmented_control(key="view").set_value("Потоки")
+        self.rerun(app)
+        app.radio(key="flows_filter").set_value("Все потоки")
+        self.rerun(app)
+        self.assertGreaterEqual(len(app.dataframe), 1)
 
     def test_programmatic_jump_to_flow_review(self):
         app = self.run_app()
@@ -153,6 +182,68 @@ class AppSmokeTests(unittest.TestCase):
         self.rerun(app)
         self.assertEqual(app.segmented_control(key="view").value, "Разбор потока")
         self.assertEqual(app.session_state["review_flow"], 7)
+
+
+class _State(dict):
+    """Замена st.session_state: доступ и по ключу, и через атрибут."""
+    __getattr__ = dict.__getitem__
+    __setattr__ = dict.__setitem__
+
+
+class RowClickTests(unittest.TestCase):
+    def setUp(self):
+        import App  # noqa: PLC0415 — модуль приложения, main() не запускается
+        self.app = App
+        self.state = _State()
+        patcher = patch.object(App.st, "session_state", self.state)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_click_opens_flow_review(self):
+        self.state["flows_table_0"] = SimpleNamespace(selection=SimpleNamespace(rows=[1]))
+        self.app._open_selected_flow("flows_table_0", [5, 9, 12])
+        self.assertEqual((self.state["goto_flow"], self.state["goto_view"]), (9, "Разбор потока"))
+
+    def test_flow_titles(self):
+        df = pd.DataFrame({"Src IP": ["203.0.113.1", "203.0.113.2", "203.0.113.3"],
+                           "Dst IP": "10.0.0.1", "Dst Port": [22, 443, 80]})
+        result = SimpleNamespace(df=df, mask=np.array([True, False, True]),
+                                 scores=np.array([-0.1234, 0.2, -0.05]))
+        brute = SimpleNamespace(threshold=0.5, display_name="RF")
+        probs = np.array([0.91, 0.7, 0.1])
+        titles = self.app._flow_titles(result, [2, 0, 1], brute, probs)  # порядок — как в списке
+        self.assertEqual(titles, {
+            2: "#2 · 203.0.113.3 → 10.0.0.1:80 · IF -0.050",
+            0: "#0 · 203.0.113.1 → 10.0.0.1:22 · RF p=0.91 · IF -0.123",
+            1: "#1 · 203.0.113.2 → 10.0.0.1:443 · RF p=0.70",
+        })
+        bare = SimpleNamespace(df=df.drop(columns=["Dst Port"]), mask=result.mask, scores=result.scores)
+        self.assertEqual(self.app._flow_titles(bare, [1, 0], None, None), {1: "#1", 0: "#0 · IF -0.123"})
+
+    def test_chart_specs(self):
+        # Все графики проходят через внутреннюю функцию Streamlit: если её изменят — тест упадёт
+        when = pd.date_range("2026-11-01", periods=3, freq="h")
+        cases = {
+            "timeline": (pd.DataFrame({"Время": when.repeat(2), "Модель": ["IF", "RF"] * 3,
+                                       "Тревог": [1, 2, 0, 1, 3, 0]}), ["IF", "RF"]),
+            "top": (pd.DataFrame({"Адрес": ["203.0.113.1"], "Тревог": [3]}), "Адрес"),
+            "deviation": (pd.DataFrame({"feature": ["a", "b"], "value": [5.0, 1.0], "mean": [1.0, 2.0],
+                                        "z": [3.0, -1.0], "ratio": [5.0, 0.5]}),),
+            "daily": (pd.DataFrame({"День": when.normalize()[:1], "Инцидентов": [2]}),),
+            "hourly": (pd.DataFrame({"Час": when, "Потоков": [5, 6, 7], "Тревог": [0, 1, 0]}),
+                       "Потоков", "blue"),
+        }
+        self.assertEqual(set(cases), set(self.app._CHARTS))
+        for kind, (data, *args) in cases.items():
+            for theme in ("dark", "light"):
+                with self.subTest(kind=kind, theme=theme):
+                    spec = self.app._chart_spec(kind, data, tuple(args), theme)
+                    self.assertTrue(spec["datasets"], kind)  # данные графика внутри спецификации
+
+    def test_cleared_selection_does_nothing(self):
+        self.state["incidents_table"] = SimpleNamespace(selection=SimpleNamespace(rows=[]))
+        self.app._open_selected_flow("incidents_table", [5])
+        self.assertNotIn("goto_flow", self.state)
 
 
 if __name__ == "__main__":
