@@ -826,8 +826,9 @@ python -m unittest discover -s tests -v
 `streamlit.testing` (вход, загрузка, вкладки). Тесты не требуют parquet,
 API-ключей, сети и Docker.
 
-CI: `.github/workflows/ci.yml` — Python 3.12, `compileall` и `unittest`, плюс
-сборка Docker-образа с проверкой прав на файлы и `/_stcore/health`.
+CI: `.github/workflows/ci.yml` — `compileall` и `unittest` на Python 3.12
+(основная) и 3.15 (заранее), плюс сборка Docker-образа с проверкой прав на
+файлы и `/_stcore/health`.
 
 Мутационное тестирование (вручную, не в CI): `cosmic-ray` вносит в модуль
 мелкие ошибки и проверяет, что тесты их замечают. На `alerts`, `integrity`,
