@@ -101,6 +101,14 @@ def load_state(directory: str) -> dict:
     return state
 
 
+def _write_parquet(frame: pd.DataFrame, path: str) -> None:
+    """Через временный файл: приложение читает историю, пока monitor.py её пишет,
+    и не должно увидеть недописанный файл."""
+    temporary = path + ".tmp"
+    frame.to_parquet(temporary, index=False)
+    replace_file(temporary, path)
+
+
 def save_state(directory: str, state: dict) -> None:
     os.makedirs(directory, exist_ok=True)
     path = os.path.join(directory, STATE_FILE)
@@ -258,12 +266,14 @@ def run(
     state = load_state(directory)
     summary = RunSummary()
     all_incidents = []
+    checked = set()  # серверы, инциденты которых собраны в этом прогоне
 
     for server in servers:
         if not os.path.isdir(server.local):
             summary.errors.append(f"{server.name}: нет папки {server.local}")
             log(f"{server.name}: нет папки {server.local} — пропуск")
             continue
+        checked.add(server.name)
         # Первый запуск для сервера (в том числе добавленного в конфиг позже)
         first_run = not any(key.startswith(server.name + "/") for key in state["processed"])
         if first_run and backfill_days >= 0:
@@ -294,10 +304,10 @@ def run(
         if new_frames:
             flagged = merge_flagged(flagged, pd.concat(new_frames, ignore_index=True))
             os.makedirs(os.path.join(directory, server.name), exist_ok=True)
-            flagged.to_parquet(_flagged_path(directory, server), index=False)
+            _write_parquet(flagged, _flagged_path(directory, server))
         if new_hourly:
             hourly = merge_hourly(load_hourly(directory, server.name), new_hourly)
-            hourly.to_parquet(os.path.join(directory, server.name, HOURLY_FILE), index=False)
+            _write_parquet(hourly, os.path.join(directory, server.name, HOURLY_FILE))
         all_incidents.append(server_incidents(server, flagged, state["local_ip"].get(server.name)))
 
     frames = [frame for frame in all_incidents if len(frame)]
@@ -330,14 +340,19 @@ def run(
     # давно нет новых тревог, без этого старые инциденты уходили бы в Telegram
     # заново при каждой проверке
     cutoff = datetime.fromtimestamp(now, timezone.utc).replace(tzinfo=None) - timedelta(days=RETAIN_DAYS + 1)
+    # Серверы, пропущенные в этом прогоне (нет папки), не трогаем: их инциденты не собраны
     current = set(keys)
-    state["notified"] = sorted(k for k in notified
-                               if k in current or pd.Timestamp(k.rsplit("|", 1)[1]) >= cutoff)
+    state["notified"] = sorted(
+        k for k in notified
+        if k.split("|", 1)[0] not in checked or k in current
+        or pd.Timestamp(k.rsplit("|", 1)[1]) >= cutoff
+    )
+    # Сначала — что уже отправлено: если запись инцидентов не удастся,
+    # следующий прогон не разошлёт их заново
+    save_state(directory, state)
     incidents = incidents.copy()
     incidents["notified"] = [key in notified for key in keys]
-    os.makedirs(directory, exist_ok=True)
-    incidents.to_parquet(os.path.join(directory, INCIDENTS_FILE), index=False)
-    save_state(directory, state)
+    _write_parquet(incidents, os.path.join(directory, INCIDENTS_FILE))
     return summary
 
 

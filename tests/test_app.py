@@ -171,6 +171,27 @@ class AppSmokeTests(unittest.TestCase):
         self.rerun(app)
         self.assertGreaterEqual(len(app.dataframe), 1)
 
+    def test_new_file_starts_from_overview(self):
+        # Раздел и номер потока прошлого файла к новому не относятся (номер мог
+        # не влезть в новый файл — тогда number_input падал)
+        app = self.run_app()
+        app.file_uploader[0].set_value(("a.csv", synthetic_flows(300), "text/csv"))
+        self.rerun(app)
+        next(b for b in app.button if b.label == "Анализировать").click()
+        self.rerun(app)
+        app.segmented_control(key="view").set_value("Разбор потока")
+        self.rerun(app)
+        app.radio(key="flow_mode").set_value("По номеру строки")
+        self.rerun(app)
+        app.number_input(key="flow_row").set_value(250)
+        self.rerun(app)
+        app.file_uploader[0].set_value(("b.csv", synthetic_flows(60), "text/csv"))
+        self.rerun(app)
+        self.assertNotIn("review_flow", app.session_state)
+        next(b for b in app.button if b.label == "Анализировать").click()
+        self.rerun(app)
+        self.assertEqual(app.segmented_control(key="view").value, "Обзор")
+
     def test_programmatic_jump_to_flow_review(self):
         app = self.run_app()
         app.file_uploader[0].set_value(("flows.csv", synthetic_flows(), "text/csv"))

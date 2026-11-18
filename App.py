@@ -311,6 +311,7 @@ def _render_identity() -> None:
             "derived",
             "model_warnings_logged",
             "llm_keys",
+            *ANALYSIS_VIEW_KEYS,
         ):
             st.session_state.pop(key, None)
         st.rerun()
@@ -464,6 +465,8 @@ def _render_flow_review(
     if target is None and "flow_mode" not in st.session_state:
         # Streamlit забывает виджеты скрытой вкладки — возвращаем прежний поток
         target = st.session_state.get("review_flow")
+    if target is not None and not 0 <= target < result.total:
+        target = None  # номер из другого файла: в этом столько строк нет
     if target is not None:
         # Поток выбран кликом в таблице: ставим его в виджеты до их создания
         if target in candidates:
@@ -881,11 +884,18 @@ def _render_analysis(
         )
 
 
+# Что запоминается между вкладками (раздел, поток, фильтр) — относится к одному
+# анализу: в новом файле те же номера строк значат другие потоки
+ANALYSIS_VIEW_KEYS = ("review_flow", "goto_flow", "goto_view", "view_choice", "flows_choice")
+
+
 def _reset_analysis() -> None:
     st.session_state.analysis = None
     st.session_state.explanations = {}
     st.session_state.brute = None
     st.session_state.derived = None
+    for key in ANALYSIS_VIEW_KEYS:
+        st.session_state.pop(key, None)
 
 
 def _render_llm_keys(user, role, registry) -> dict:
@@ -1559,9 +1569,14 @@ def _render_server_card(entry, user, role) -> None:
             st.caption("Сбор на сервере не останавливается, скачанные файлы остаются.")
             if st.button("Убрать из списка", key=f"server_remove_{entry.name}",
                          icon=":material/delete:"):
-                srv.remove_from_config(entry.name)
-                log_event(user, role, "server_remove", server=entry.name, host=entry.host)
-                st.rerun()
+                try:
+                    srv.remove_from_config(entry.name)
+                except (srv.ServerError, OSError) as exc:
+                    # Уже убран в другой вкладке или файл занят — сообщение вместо падения
+                    st.error(str(exc), icon=":material/error:")
+                else:
+                    log_event(user, role, "server_remove", server=entry.name, host=entry.host)
+                    st.rerun()
         result = st.session_state.get(f"server_out_{entry.name}")
         if result is not None:
             kind, text = result

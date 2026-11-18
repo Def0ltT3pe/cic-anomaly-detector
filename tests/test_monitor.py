@@ -9,8 +9,10 @@ from unittest.mock import patch
 
 import pandas as pd
 
+from modules import monitor as monitor_module
 from modules.alerts import parse_trusted
 from modules.monitor import (
+    INCIDENTS_FILE,
     MAX_SEPARATE_MESSAGES,
     RETAIN_DAYS,
     Server,
@@ -104,6 +106,34 @@ class MonitorTests(MonitorCase):
         for days in (20, 40):  # проверки через три и шесть недель, новых файлов нет
             summary = self.run_once(now=pd.Timestamp("2026-11-01").timestamp() + days * 86400)
             self.assertEqual((summary.new_incidents, summary.notified), (0, 0))
+        self.assertEqual(len(self.sent), 1)
+
+    def test_old_incident_not_resent_after_folder_was_missing(self):
+        # Папка сервера пропала на один прогон (внешний диск отключён): его старые
+        # отметки «отправлено» не должны стереться
+        self.capture("capture_1.pcapng", flagged(("203.0.113.5", 22, "2026-11-01 10:05", 0.9)))
+        self.assertEqual(self.run_once().notified, 1)
+        later = pd.Timestamp("2026-11-01").timestamp() + 30 * 86400
+        moved = self.local + "_off"
+        os.rename(self.local, moved)
+        self.run_once(now=later)
+        os.rename(moved, self.local)
+        self.assertEqual(self.run_once(now=later).notified, 0)
+        self.assertEqual(len(self.sent), 1)
+
+    def test_sent_marks_saved_even_if_incidents_file_is_locked(self):
+        # incidents.parquet держит антивирус или приложение: отправленное не теряется
+        self.capture("capture_1.pcapng", flagged(("203.0.113.5", 22, "2026-11-01 10:05", 0.9)))
+        real = monitor_module._write_parquet
+
+        def locked(frame, path):
+            if path.endswith(INCIDENTS_FILE):
+                raise PermissionError("файл занят")
+            real(frame, path)
+        with patch.object(monitor_module, "_write_parquet", locked):
+            with self.assertRaises(PermissionError):
+                self.run_once()
+        self.assertEqual(self.run_once().notified, 0)
         self.assertEqual(len(self.sent), 1)
 
     def test_incident_builds_up_across_files(self):
