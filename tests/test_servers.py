@@ -294,6 +294,35 @@ class PasswordBootstrapTests(unittest.TestCase):
             install_key_with_password(self.entry, "pass", "ssh-ed25519 AAAA me@pc")
         self.assertIn("Не удалось подключиться", str(caught.exception))
 
+    def test_banner_reset_is_retried(self):
+        # sshd (MaxStartups) сбросил первые два соединения до приветствия
+        resets = [self.paramiko.SSHException("Error reading SSH protocol banner[WinError 10054]"),
+                  ConnectionResetError(10054, "reset")]
+        client, key = self.fake_client()
+
+        class Flaky(client):
+            def connect(self_inner, host, username, password, **kwargs):
+                if resets:
+                    raise resets.pop(0)
+                super().connect(host, username, password, **kwargs)
+
+        sleeps = []
+        with patch.object(self.paramiko, "SSHClient", Flaky), patch.object(servers, "_sleep", sleeps.append):
+            install_key_with_password(self.entry, "pass", "ssh-ed25519 AAAA me@pc")
+        self.assertEqual(len(sleeps), 2)
+        self.assertEqual(len(self.commands), 1)  # ключ записан один раз
+        with open(os.path.join(self.tmp, "known_hosts"), encoding="utf-8") as handle:
+            self.assertEqual(handle.read().count(key.get_base64()), 1)
+
+    def test_banner_reset_gives_up_with_hint(self):
+        client, _ = self.fake_client(fail=self.paramiko.SSHException("Error reading SSH protocol banner"))
+        sleeps = []
+        with patch.object(self.paramiko, "SSHClient", client), patch.object(servers, "_sleep", sleeps.append), \
+                self.assertRaises(ServerError) as caught:
+            install_key_with_password(self.entry, "pass", "ssh-ed25519 AAAA me@pc")
+        self.assertEqual(len(sleeps), servers.CONNECT_ATTEMPTS - 1)
+        self.assertIn("MaxStartups", str(caught.exception))
+
     def test_key_write_failure(self):
         client, _ = self.fake_client(exit_status=1)
         with patch.object(self.paramiko, "SSHClient", client), self.assertRaises(ServerError) as caught:
@@ -392,6 +421,33 @@ class EdgeCaseTests(unittest.TestCase):
         with self.assertRaises(ServerError) as caught:
             collector(self.root, "status", runner=FakeRunner(b"", returncode=3))
         self.assertIn("3", str(caught.exception))
+
+    def test_handshake_reset_is_retried_for_ssh(self):
+        outputs = [(255, b"kex_exchange_identification: read: Connection reset"),
+                   (255, b"kex_exchange_identification: Connection closed by remote host"),
+                   (0, "Состояние: идёт запись".encode())]
+        calls = []
+
+        def runner(args, input=None, capture_output=True, timeout=None):
+            calls.append(args)
+            code, out = outputs.pop(0)
+            return subprocess.CompletedProcess(args, code, out, b"")
+
+        with patch.object(servers, "_sleep", lambda seconds: None):
+            self.assertIn("идёт запись", collector(self.root, "status", runner=runner))
+        self.assertEqual(len(calls), 3)
+
+    def test_other_ssh_failures_are_not_retried(self):
+        runner = FakeRunner(b"Permission denied (publickey)", returncode=255)
+        with patch.object(servers, "_sleep", lambda seconds: None), self.assertRaises(ServerError) as caught:
+            collector(self.root, "status", runner=runner)
+        self.assertEqual(len(runner.calls), 1)
+        self.assertNotIn("MaxStartups", str(caught.exception))
+        runner = FakeRunner(b"kex_exchange_identification: read: Connection reset", returncode=255)
+        with patch.object(servers, "_sleep", lambda seconds: None), self.assertRaises(ServerError) as caught:
+            collector(self.root, "status", runner=runner)
+        self.assertEqual(len(runner.calls), servers.CONNECT_ATTEMPTS)
+        self.assertIn("MaxStartups", str(caught.exception))
 
     def test_collection_command_reads_status_and_session(self):
         for entry, prefix in ((self.root, ""), (ServerEntry("s", "deploy", "203.0.113.10"), "sudo -n ")):
