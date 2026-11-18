@@ -325,9 +325,14 @@ def run(
             summary.errors.append(f"уведомление: {exc}")
             log(f"Уведомление не отправлено: {exc}")
 
-    # Ключи старше истории тревог уже не появятся снова
+    # Старые ключи забываются, но не те, чьи инциденты ещё в истории: она обрезается
+    # от самой свежей тревоги сервера, а не от сегодняшнего дня, — если с сервера
+    # давно нет новых тревог, без этого старые инциденты уходили бы в Telegram
+    # заново при каждой проверке
     cutoff = datetime.fromtimestamp(now, timezone.utc).replace(tzinfo=None) - timedelta(days=RETAIN_DAYS + 1)
-    state["notified"] = sorted(k for k in notified if pd.Timestamp(k.rsplit("|", 1)[1]) >= cutoff)
+    current = set(keys)
+    state["notified"] = sorted(k for k in notified
+                               if k in current or pd.Timestamp(k.rsplit("|", 1)[1]) >= cutoff)
     incidents = incidents.copy()
     incidents["notified"] = [key in notified for key in keys]
     os.makedirs(directory, exist_ok=True)

@@ -96,6 +96,16 @@ class MonitorTests(MonitorCase):
         self.assertEqual(len(self.sent), 1)
         self.assertTrue(load_incidents(self.state)[0]["notified"].all())
 
+    def test_old_incident_not_resent_when_server_is_quiet(self):
+        # Последняя тревога сервера старше RETAIN_DAYS от «сегодня»: инцидент остаётся
+        # в истории, и повторно уходить в Telegram он не должен
+        self.capture("capture_1.pcapng", flagged(("203.0.113.5", 22, "2026-11-01 10:05", 0.9)))
+        self.assertEqual(self.run_once().notified, 1)
+        for days in (20, 40):  # проверки через три и шесть недель, новых файлов нет
+            summary = self.run_once(now=pd.Timestamp("2026-11-01").timestamp() + days * 86400)
+            self.assertEqual((summary.new_incidents, summary.notified), (0, 0))
+        self.assertEqual(len(self.sent), 1)
+
     def test_incident_builds_up_across_files(self):
         # «≥3 потоков за час» складывается из двух файлов одного часа
         self.capture("capture_1.pcapng", flagged(("198.51.100.7", 443, "2026-11-01 10:05", 0.8),
